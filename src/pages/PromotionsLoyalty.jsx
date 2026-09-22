@@ -1,11 +1,13 @@
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useEffect } from 'react';
 import {
   Plus, Pencil, Trash2, ToggleLeft, ToggleRight,
-  Tag, Star, Save, X, AlertCircle,
+  Tag, Star, Save, X, AlertCircle, Building2, Package, Calendar, Filter, CheckCircle2,
 } from 'lucide-react';
 import { useDB }   from '../context/DBContext.jsx';
 import { useAuth } from '../context/AuthContext.jsx';
-import { promotionsDB, loyaltyTiersDB } from '../db/db.js';
+import { fetchStores } from '../services/supabaseService.js';
+import { savePromotion, togglePromotion, deletePromotion } from '../services/promotionService.js';
+import { loyaltyTiersDB, storesDB } from '../db/db.js';
 
 // ─── Shared micro-components ─────────────────────────────────────────────────
 
@@ -23,7 +25,14 @@ function SectionHeader({ icon: Icon, title, sub }) {
   );
 }
 
-function Badge({ active }) {
+function Badge({ active, syncStatus }) {
+  if (syncStatus === 'PENDING_SYNC') {
+    return (
+      <span className="rounded-full bg-amber-100 px-2 py-0.5 text-[11px] font-bold text-amber-700">
+        Offline Pending
+      </span>
+    );
+  }
   return active
     ? <span className="rounded-full bg-emerald-100 px-2 py-0.5 text-[11px] font-bold text-emerald-700">Active</span>
     : <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[11px] font-bold text-slate-400">Inactive</span>;
@@ -32,12 +41,19 @@ function Badge({ active }) {
 function RowActions({ onEdit, onToggle, onDelete, active }) {
   return (
     <div className="flex items-center gap-1">
-      <button onClick={onEdit}   title="Edit"   className="rounded-lg p-1.5 text-slate-400 hover:bg-slate-100 hover:text-brand"><Pencil size={14} /></button>
-      <button onClick={onToggle} title={active ? 'Deactivate' : 'Activate'}
-        className={`rounded-lg p-1.5 ${active ? 'text-emerald-500 hover:bg-emerald-50' : 'text-slate-300 hover:bg-slate-100'}`}>
-        {active ? <ToggleRight size={16} /> : <ToggleLeft size={16} />}
+      <button onClick={onEdit} title="Edit" className="rounded-lg p-1.5 text-slate-400 hover:bg-slate-100 hover:text-brand">
+        <Pencil size={14} />
       </button>
-      <button onClick={onDelete} title="Delete" className="rounded-lg p-1.5 text-slate-300 hover:bg-red-50 hover:text-red-500"><Trash2 size={14} /></button>
+      <button
+        onClick={onToggle}
+        title={active ? 'Deactivate' : 'Activate'}
+        className={`rounded-lg p-1.5 transition-colors ${active ? 'text-emerald-500 hover:bg-emerald-50' : 'text-slate-300 hover:bg-slate-100'}`}
+      >
+        {active ? <ToggleRight size={18} /> : <ToggleLeft size={18} />}
+      </button>
+      <button onClick={onDelete} title="Delete" className="rounded-lg p-1.5 text-slate-300 hover:bg-red-50 hover:text-red-500">
+        <Trash2 size={14} />
+      </button>
     </div>
   );
 }
@@ -47,94 +63,252 @@ function RowActions({ onEdit, onToggle, onDelete, active }) {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 const BLANK_PROMO = {
-  name: '', discountType: 'percent', value: '', minCartValue: '',
-  scope: 'all', branchId: null, active: true,
+  name: '',
+  discountType: 'percent',
+  value: '',
+  minCartValue: '',
+  scope: 'all',
+  productId: null,
+  branchId: null,
+  startDate: '',
+  endDate: '',
+  active: true,
 };
 
-function PromotionsSection({ promotions, refresh, currentUser, currentBranch, isAdmin }) {
-  const [form, setForm]     = useState(null); // null = closed, {} = new, {id,...} = edit
-  const [saving, setSaving] = useState(false);
-  const [err, setErr]       = useState('');
+function PromotionsSection({
+  promotions,
+  refresh,
+  currentUser,
+  currentBranch,
+  isAdmin,
+  stores = [],
+  products = [],
+}) {
+  const [form, setForm]         = useState(null); // null = closed, {} = new, {id,...} = edit
+  const [saving, setSaving]     = useState(false);
+  const [err, setErr]           = useState('');
+  const [success, setSuccess]   = useState('');
+  const [filterBranch, setFilterBranch] = useState('all');
+  const [filterStatus, setFilterStatus] = useState('all'); // all, active, inactive
 
-  const openNew  = () => { setForm({ ...BLANK_PROMO, branchId: isAdmin ? null : currentBranch?.id ?? null }); setErr(''); };
-  const openEdit = (p) => { setForm({ ...p }); setErr(''); };
-  const closeForm = () => setForm(null);
+  const openNew = () => {
+    setForm({
+      ...BLANK_PROMO,
+      branchId: currentBranch?.id ?? null,
+    });
+    setErr('');
+    setSuccess('');
+  };
+
+  const openEdit = (p) => {
+    setForm({
+      ...BLANK_PROMO,
+      ...p,
+      branchId: p.branchId !== undefined && p.branchId !== null ? p.branchId : '',
+      productId: p.productId ?? null,
+      startDate: p.startDate ? String(p.startDate).slice(0, 10) : '',
+      endDate: p.endDate ? String(p.endDate).slice(0, 10) : '',
+    });
+    setErr('');
+    setSuccess('');
+  };
+
+  const closeForm = () => {
+    setForm(null);
+    setErr('');
+  };
 
   const handleSave = useCallback(async (e) => {
     e.preventDefault();
-    if (!form.name.trim()) return setErr('Name is required.');
+    if (!form.name.trim()) return setErr('Promotion name is required.');
     const val = parseFloat(form.value);
     if (isNaN(val) || val <= 0) return setErr('Enter a valid discount value > 0.');
+    if (form.discountType === 'percent' && val > 100) return setErr('Percentage discount cannot exceed 100%.');
+    if (form.scope === 'product' && !form.productId) {
+      return setErr('Please select a product for product-specific promotion.');
+    }
+
     setSaving(true);
+    setErr('');
     try {
-      const record = {
-        id:           form.id ?? `promo-${Date.now()}`,
-        name:         form.name.trim(),
-        discountType: form.discountType,
-        value:        val,
+      await savePromotion({
+        ...form,
+        name: form.name.trim(),
+        value: val,
         minCartValue: parseFloat(form.minCartValue) || 0,
-        scope:        form.scope,
-        branchId:     form.branchId,
-        active:       form.active,
-        createdBy:    form.createdBy ?? currentUser?.userId,
-      };
-      await promotionsDB.put(record);
+        branchId: form.branchId ? (Number(form.branchId) || form.branchId) : null,
+        productId: form.scope === 'product' && form.productId ? Number(form.productId) : null,
+        startDate: form.startDate || null,
+        endDate: form.endDate || null,
+      });
+
       await refresh();
+      setSuccess(`Promotion "${form.name.trim()}" saved successfully.`);
+      setTimeout(() => setSuccess(''), 4000);
       closeForm();
-    } finally { setSaving(false); }
-  }, [form, currentUser, refresh]);
+    } catch (saveErr) {
+      console.error('[PromotionsSection] Save failed:', saveErr);
+      setErr(saveErr.message || 'Failed to save promotion to database.');
+    } finally {
+      setSaving(false);
+    }
+  }, [form, refresh]);
 
   const handleToggle = async (p) => {
-    await promotionsDB.put({ ...p, active: !p.active });
-    await refresh();
+    try {
+      await togglePromotion(p);
+      await refresh();
+    } catch (toggleErr) {
+      console.error('[PromotionsSection] Toggle failed:', toggleErr);
+    }
   };
 
-  const handleDelete = async (id) => {
-    if (!confirm('Delete this promotion?')) return;
-    await promotionsDB.delete(id);
-    await refresh();
+  const handleDelete = async (id, name) => {
+    if (!confirm(`Are you sure you want to delete promotion "${name || id}"?`)) return;
+    try {
+      await deletePromotion(id);
+      await refresh();
+      setSuccess('Promotion deleted.');
+      setTimeout(() => setSuccess(''), 3000);
+    } catch (delErr) {
+      console.error('[PromotionsSection] Delete failed:', delErr);
+    }
   };
 
-  // Managers only see promos scoped to their branch or null (all-branch)
-  const visible = isAdmin
-    ? promotions
-    : promotions.filter((p) => p.branchId === null || p.branchId === currentBranch?.id);
+  // Branch filtering & role filtering
+  const visible = promotions.filter((p) => {
+    // Role filter: non-admins only see promos matching their branch or all-branch
+    if (!isAdmin && currentBranch?.id) {
+      const matchBranch = !p.branchId || String(p.branchId) === String(currentBranch.id);
+      if (!matchBranch) return false;
+    }
+    // Filter dropdown
+    if (filterBranch !== 'all') {
+      if (filterBranch === 'all-branches') {
+        if (p.branchId) return false;
+      } else if (String(p.branchId) !== String(filterBranch)) {
+        return false;
+      }
+    }
+    // Status filter
+    if (filterStatus === 'active' && !p.active) return false;
+    if (filterStatus === 'inactive' && p.active) return false;
+    return true;
+  });
 
   return (
     <section className="card overflow-hidden">
       <div className="border-b border-slate-100 px-6 py-5">
-        <SectionHeader icon={Tag} title="Promotions"
-          sub="Active promotions appear automatically in the Billing promotions dropdown." />
-        <button onClick={openNew} className="btn-primary px-4 py-2 text-sm">
-          <Plus size={15} /> Add Promotion
-        </button>
+        <div className="flex flex-wrap items-center justify-between gap-4">
+          <SectionHeader
+            icon={Tag}
+            title="Promotions"
+            sub="Active promotions appear automatically in the Billing checkout dropdown and apply in real-time."
+          />
+          <button onClick={openNew} className="btn-primary px-4 py-2 text-sm flex items-center gap-1.5">
+            <Plus size={15} /> Add Promotion
+          </button>
+        </div>
+
+        {/* Filters bar */}
+        <div className="mt-4 flex flex-wrap items-center gap-3">
+          <div className="flex items-center gap-1.5 text-xs font-bold text-slate-500">
+            <Filter size={13} className="text-brand" />
+            Branch:
+          </div>
+          <select
+            className="rounded-lg border border-slate-200 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 shadow-sm focus:border-brand focus:outline-none"
+            value={filterBranch}
+            onChange={(e) => setFilterBranch(e.target.value)}
+          >
+            <option value="all">All Promotions</option>
+            <option value="all-branches">All-Branches Scope Only</option>
+            {stores.map((s) => (
+              <option key={s.id} value={s.id}>
+                {s.name} ({s.location || 'Store'})
+              </option>
+            ))}
+          </select>
+
+          <div className="flex rounded-lg border border-slate-200 bg-slate-50 p-0.5 text-xs font-semibold text-slate-600">
+            <button
+              onClick={() => setFilterStatus('all')}
+              className={`rounded px-2.5 py-1 transition-colors ${filterStatus === 'all' ? 'bg-white text-brand shadow-xs font-bold' : 'hover:text-slate-900'}`}
+            >
+              All ({promotions.length})
+            </button>
+            <button
+              onClick={() => setFilterStatus('active')}
+              className={`rounded px-2.5 py-1 transition-colors ${filterStatus === 'active' ? 'bg-white text-emerald-600 shadow-xs font-bold' : 'hover:text-slate-900'}`}
+            >
+              Active ({promotions.filter((p) => p.active).length})
+            </button>
+            <button
+              onClick={() => setFilterStatus('inactive')}
+              className={`rounded px-2.5 py-1 transition-colors ${filterStatus === 'inactive' ? 'bg-white text-slate-700 shadow-xs font-bold' : 'hover:text-slate-900'}`}
+            >
+              Inactive ({promotions.filter((p) => !p.active).length})
+            </button>
+          </div>
+        </div>
+
+        {success && (
+          <div className="mt-3 flex items-center gap-2 rounded-lg bg-emerald-50 px-3 py-2 text-xs font-bold text-emerald-700">
+            <CheckCircle2 size={14} />
+            {success}
+          </div>
+        )}
       </div>
 
       {/* Add / Edit form */}
       {form && (
-        <form onSubmit={handleSave} className="border-b border-slate-100 bg-slate-50 px-6 py-5 space-y-4">
-          <p className="font-bold text-slate-700">{form.id ? 'Edit Promotion' : 'New Promotion'}</p>
+        <form onSubmit={handleSave} className="border-b border-slate-100 bg-slate-50/90 px-6 py-5 space-y-4">
+          <div className="flex items-center justify-between">
+            <p className="font-extrabold text-slate-800 flex items-center gap-2">
+              <Tag size={16} className="text-brand" />
+              {form.id ? 'Edit Promotion' : 'New Promotion'}
+            </p>
+            <button type="button" onClick={closeForm} className="text-slate-400 hover:text-slate-600">
+              <X size={18} />
+            </button>
+          </div>
 
           <div className="grid gap-4 sm:grid-cols-2">
             <label className="block text-sm font-bold text-slate-700">
-              Name *
-              <input className="field mt-1" value={form.name}
-                onChange={(e) => setForm((f) => ({ ...f, name: e.target.value }))} placeholder="e.g. Weekend Special" />
+              Promotion Name *
+              <input
+                className="field mt-1"
+                value={form.name}
+                onChange={(e) => setForm((f) => ({ ...f, name: e.target.value }))}
+                placeholder="e.g. Festival Special Discount"
+                autoFocus
+              />
             </label>
+
             <div className="grid grid-cols-2 gap-2">
               <label className="block text-sm font-bold text-slate-700">
-                Type
-                <select className="field mt-1" value={form.discountType}
-                  onChange={(e) => setForm((f) => ({ ...f, discountType: e.target.value }))}>
+                Discount Type
+                <select
+                  className="field mt-1"
+                  value={form.discountType}
+                  onChange={(e) => setForm((f) => ({ ...f, discountType: e.target.value }))}
+                >
                   <option value="percent">Percent (%)</option>
                   <option value="flat">Flat (₹)</option>
                 </select>
               </label>
+
               <label className="block text-sm font-bold text-slate-700">
                 Value *
-                <input className="field mt-1" type="number" min="0.01" step="0.01"
-                  value={form.value} onChange={(e) => setForm((f) => ({ ...f, value: e.target.value }))}
-                  placeholder={form.discountType === 'percent' ? '10' : '50'} />
+                <input
+                  className="field mt-1"
+                  type="number"
+                  min="0.01"
+                  step="0.01"
+                  value={form.value}
+                  onChange={(e) => setForm((f) => ({ ...f, value: e.target.value }))}
+                  placeholder={form.discountType === 'percent' ? '10' : '50'}
+                />
               </label>
             </div>
           </div>
@@ -142,78 +316,206 @@ function PromotionsSection({ promotions, refresh, currentUser, currentBranch, is
           <div className="grid gap-4 sm:grid-cols-3">
             <label className="block text-sm font-bold text-slate-700">
               Min Cart Value (₹)
-              <input className="field mt-1" type="number" min="0"
-                value={form.minCartValue} onChange={(e) => setForm((f) => ({ ...f, minCartValue: e.target.value }))}
-                placeholder="0 = always applies" />
+              <input
+                className="field mt-1"
+                type="number"
+                min="0"
+                value={form.minCartValue}
+                onChange={(e) => setForm((f) => ({ ...f, minCartValue: e.target.value }))}
+                placeholder="0 = always applies"
+              />
             </label>
+
             <label className="block text-sm font-bold text-slate-700">
               Scope
-              <select className="field mt-1" value={form.scope}
-                onChange={(e) => setForm((f) => ({ ...f, scope: e.target.value }))}>
+              <select
+                className="field mt-1"
+                value={form.scope}
+                onChange={(e) => setForm((f) => ({
+                  ...f,
+                  scope: e.target.value,
+                  productId: e.target.value === 'product' ? (products[0]?.id ?? null) : null,
+                }))}
+              >
                 <option value="all">Whole store</option>
-                <option value="category">By category</option>
                 <option value="product">Specific product</option>
               </select>
             </label>
-            {isAdmin && (
-              <label className="block text-sm font-bold text-slate-700">
-                Branch
-                <select className="field mt-1" value={form.branchId ?? ''}
-                  onChange={(e) => setForm((f) => ({ ...f, branchId: e.target.value || null }))}>
-                  <option value="">Both branches</option>
-                  <option value="store-a">Branch A only</option>
-                  <option value="store-b">Branch B only</option>
-                </select>
-              </label>
-            )}
+
+            <label className="block text-sm font-bold text-slate-700">
+              Branch (Database Stores)
+              <select
+                className="field mt-1 font-semibold"
+                value={form.branchId ?? ''}
+                onChange={(e) => setForm((f) => ({
+                  ...f,
+                  branchId: e.target.value ? (Number(e.target.value) || e.target.value) : null,
+                }))}
+              >
+                <option value="">All Branches</option>
+                {stores.map((s) => (
+                  <option key={s.id} value={s.id}>
+                    {s.name}{s.location ? ` (${s.location})` : ''}
+                  </option>
+                ))}
+              </select>
+            </label>
           </div>
 
-          <div className="flex items-center gap-3">
+          {/* Conditional Specific Product Dropdown */}
+          {form.scope === 'product' && (
+            <div className="rounded-xl border border-blue-200 bg-blue-50/50 p-4">
+              <label className="block text-sm font-bold text-slate-700">
+                <span className="flex items-center gap-1.5 mb-1 text-brand">
+                  <Package size={14} />
+                  Choose Product for this Promotion *
+                </span>
+                <select
+                  className="field bg-white"
+                  value={form.productId ?? ''}
+                  onChange={(e) => setForm((f) => ({ ...f, productId: e.target.value ? Number(e.target.value) : null }))}
+                >
+                  <option value="">— Select product from database —</option>
+                  {products.map((prod) => (
+                    <option key={prod.id} value={prod.id}>
+                      {prod.name} ({prod.category || 'General'}) — ₹{prod.price} [SKU: {prod.sku || prod.barcode || prod.id}]
+                    </option>
+                  ))}
+                </select>
+              </label>
+            </div>
+          )}
+
+          {/* Validity dates */}
+          <div className="grid gap-4 sm:grid-cols-2">
+            <label className="block text-sm font-bold text-slate-700">
+              Valid From (optional)
+              <input
+                type="date"
+                className="field mt-1"
+                value={form.startDate ?? ''}
+                onChange={(e) => setForm((f) => ({ ...f, startDate: e.target.value }))}
+              />
+            </label>
+
+            <label className="block text-sm font-bold text-slate-700">
+              Valid Until (optional)
+              <input
+                type="date"
+                className="field mt-1"
+                value={form.endDate ?? ''}
+                onChange={(e) => setForm((f) => ({ ...f, endDate: e.target.value }))}
+              />
+            </label>
+          </div>
+
+          <div className="flex items-center gap-3 pt-1">
             <label className="flex cursor-pointer items-center gap-2 text-sm font-bold text-slate-700">
-              <input type="checkbox" checked={form.active}
-                onChange={(e) => setForm((f) => ({ ...f, active: e.target.checked }))} />
+              <input
+                type="checkbox"
+                checked={form.active}
+                onChange={(e) => setForm((f) => ({ ...f, active: e.target.checked }))}
+                className="h-4 w-4 rounded border-slate-300 text-brand focus:ring-brand"
+              />
               Active immediately
             </label>
           </div>
 
-          {err && <div className="flex items-center gap-2 text-sm text-red-600"><AlertCircle size={14} />{err}</div>}
+          {err && (
+            <div className="flex items-center gap-2 rounded-lg bg-red-50 p-2.5 text-sm text-red-600 font-semibold">
+              <AlertCircle size={15} />
+              {err}
+            </div>
+          )}
 
-          <div className="flex gap-2">
-            <button type="submit" disabled={saving} className="btn-primary px-4 py-2 text-sm disabled:opacity-60">
-              <Save size={14} />{saving ? 'Saving…' : 'Save'}
+          <div className="flex gap-2 pt-2">
+            <button type="submit" disabled={saving} className="btn-primary px-5 py-2 text-sm disabled:opacity-60 flex items-center gap-1.5">
+              <Save size={14} />
+              {saving ? 'Saving to Database…' : 'Save Promotion'}
             </button>
-            <button type="button" onClick={closeForm} className="btn-secondary px-4 py-2 text-sm">
-              <X size={14} />Cancel
+            <button type="button" onClick={closeForm} className="btn-secondary px-4 py-2 text-sm flex items-center gap-1.5">
+              <X size={14} />
+              Cancel
             </button>
           </div>
         </form>
       )}
 
-      {/* Table */}
+      {/* Promotions List */}
       {visible.length === 0 ? (
-        <div className="flex h-32 items-center justify-center text-sm text-slate-400">No promotions yet — add one above.</div>
+        <div className="flex flex-col items-center justify-center py-12 text-center text-slate-400">
+          <Tag size={36} className="text-slate-300 mb-2" />
+          <p className="font-bold text-slate-600">No promotions found</p>
+          <p className="text-xs text-slate-400 mt-1 max-w-sm">
+            {promotions.length === 0
+              ? 'No promotions exist yet. Click "Add Promotion" above to create your first promotion.'
+              : 'No promotions match the selected branch/status filter.'}
+          </p>
+        </div>
       ) : (
         <div className="divide-y divide-slate-100">
-          {visible.map((p) => (
-            <div key={p.id} className="flex flex-wrap items-center gap-3 px-6 py-4">
-              <div className="min-w-0 flex-1">
-                <p className="font-bold text-sm">{p.name}</p>
-                <p className="text-xs text-slate-400 mt-0.5">
-                  {p.discountType === 'percent' ? `${p.value}%` : `₹${p.value}`} off
-                  {p.minCartValue > 0 ? ` on ₹${p.minCartValue}+` : ''}
-                  {' · '}scope: {p.scope}
-                  {p.branchId ? ` · ${p.branchId === 'store-a' ? 'Branch A' : 'Branch B'} only` : ' · all branches'}
-                </p>
+          {visible.map((p) => {
+            const branchObj = stores.find((s) => String(s.id) === String(p.branchId));
+            const branchLabel = branchObj
+              ? branchObj.name
+              : (p.branchId ? `Branch #${p.branchId}` : 'All branches');
+
+            const prodObj = p.productId
+              ? products.find((prod) => String(prod.id) === String(p.productId))
+              : null;
+
+            return (
+              <div key={p.id} className="flex flex-wrap items-center justify-between gap-3 px-6 py-4 hover:bg-slate-50/60 transition-colors">
+                <div className="min-w-0 flex-1">
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <p className="font-bold text-sm text-slate-900">{p.name}</p>
+                    <span className="inline-flex items-center rounded-md bg-blue-50 px-2 py-0.5 text-xs font-bold text-brand">
+                      {p.discountType === 'percent' ? `${p.value}% OFF` : `₹${p.value} OFF`}
+                    </span>
+                  </div>
+
+                  <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-slate-500">
+                    <span className="flex items-center gap-1 font-medium text-slate-700">
+                      <Building2 size={12} className="text-brand" />
+                      {branchLabel}
+                    </span>
+
+                    {p.scope === 'product' ? (
+                      <span className="flex items-center gap-1 font-medium text-indigo-600">
+                        <Package size={12} />
+                        Product: {prodObj ? prodObj.name : `Product #${p.productId}`}
+                      </span>
+                    ) : (
+                      <span className="text-slate-400">Scope: Whole store</span>
+                    )}
+
+                    {p.minCartValue > 0 && (
+                      <span className="text-slate-500">Min Cart: ₹{p.minCartValue}</span>
+                    )}
+
+                    {(p.startDate || p.endDate) && (
+                      <span className="flex items-center gap-1 text-slate-400">
+                        <Calendar size={11} />
+                        {p.startDate ? String(p.startDate).slice(0, 10) : 'Start'}
+                        {' → '}
+                        {p.endDate ? String(p.endDate).slice(0, 10) : 'Ongoing'}
+                      </span>
+                    )}
+                  </div>
+                </div>
+
+                <div className="flex items-center gap-3">
+                  <Badge active={p.active} syncStatus={p.syncStatus} />
+                  <RowActions
+                    active={p.active}
+                    onEdit={() => openEdit(p)}
+                    onToggle={() => handleToggle(p)}
+                    onDelete={() => handleDelete(p.id, p.name)}
+                  />
+                </div>
               </div>
-              <Badge active={p.active} />
-              <RowActions
-                active={p.active}
-                onEdit={() => openEdit(p)}
-                onToggle={() => handleToggle(p)}
-                onDelete={() => handleDelete(p.id)}
-              />
-            </div>
-          ))}
+            );
+          })}
         </div>
       )}
     </section>
@@ -271,11 +573,13 @@ function LoyaltySection({ loyaltyTiers, refresh }) {
   return (
     <section className="card overflow-hidden">
       <div className="border-b border-slate-100 px-6 py-5">
-        <SectionHeader icon={Star} title="Loyalty Tiers"
-          sub="Customers automatically receive the highest tier they qualify for at checkout." />
-        <button onClick={openNew} className="btn-primary px-4 py-2 text-sm">
-          <Plus size={15} /> Add Tier
-        </button>
+        <div className="flex items-center justify-between">
+          <SectionHeader icon={Star} title="Loyalty Tiers"
+            sub="Customers automatically receive the highest tier they qualify for at checkout." />
+          <button onClick={openNew} className="btn-primary px-4 py-2 text-sm flex items-center gap-1.5">
+            <Plus size={15} /> Add Tier
+          </button>
+        </div>
       </div>
 
       {form && (
@@ -369,8 +673,23 @@ function LoyaltySection({ loyaltyTiers, refresh }) {
 // ═══════════════════════════════════════════════════════════════════════════════
 
 export default function PromotionsLoyalty() {
-  const { promotions, loyaltyTiers, refresh } = useDB();
+  const { promotions, loyaltyTiers, refresh, products } = useDB();
   const { currentUser, currentBranch, isAdmin } = useAuth();
+  const [stores, setStores] = useState([]);
+
+  // Fetch real database stores from Supabase (with IndexedDB fallback)
+  useEffect(() => {
+    fetchStores()
+      .then((list) => {
+        setStores(list);
+        for (const s of list) storesDB.put(s).catch(() => {});
+      })
+      .catch(async (err) => {
+        console.warn('[PromotionsLoyalty] fetchStores failed, using local storesDB:', err);
+        const cached = await storesDB.getAll().catch(() => []);
+        setStores(cached);
+      });
+  }, []);
 
   return (
     <>
@@ -378,7 +697,7 @@ export default function PromotionsLoyalty() {
         <p className="eyebrow">Admin & Manager</p>
         <h1 className="mt-1 text-2xl font-extrabold">Promotions & Loyalty</h1>
         <p className="text-sm text-slate-500">
-          Manage discount promotions and visit-based loyalty tiers. Changes reflect in Billing immediately.
+          Manage branch promotions and visit-based loyalty tiers. Database synced with full offline support.
         </p>
       </div>
 
@@ -389,6 +708,8 @@ export default function PromotionsLoyalty() {
           currentUser={currentUser}
           currentBranch={currentBranch}
           isAdmin={isAdmin}
+          stores={stores}
+          products={products}
         />
         <LoyaltySection
           loyaltyTiers={loyaltyTiers}

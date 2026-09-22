@@ -12,9 +12,28 @@ import { calcLoyaltyDiscount } from '../constants/loyalty.js';
 import InvoiceModal from '../components/InvoiceModal.jsx';
 
 // ─── Promo helper ─────────────────────────────────────────────────────────────
-function applyPromotion(subtotal, promo) {
+function applyPromotion(subtotal, promo, cart = []) {
   if (!promo) return 0;
+
+  // Date validity check
+  const today = new Date().toISOString().slice(0, 10);
+  if (promo.startDate && String(promo.startDate).slice(0, 10) > today) return 0;
+  if (promo.endDate && String(promo.endDate).slice(0, 10) < today) return 0;
+
+  // Minimum cart value check
   if (promo.minCartValue && subtotal < promo.minCartValue) return 0;
+
+  // Product specific promotion
+  if (promo.scope === 'product' && promo.productId) {
+    const item = cart.find((i) => String(i.product.id) === String(promo.productId));
+    if (!item) return 0;
+    const itemTotal = item.product.price * item.qty;
+    if (promo.discountType === 'percent') return Math.round(itemTotal * promo.value / 100);
+    if (promo.discountType === 'flat')    return Math.min(promo.value, itemTotal);
+    return 0;
+  }
+
+  // Store-wide promotion
   if (promo.discountType === 'percent') return Math.round(subtotal * promo.value / 100);
   if (promo.discountType === 'flat')    return Math.min(promo.value, subtotal);
   return 0;
@@ -51,7 +70,7 @@ function LoyaltyBadge({ customer, tier }) {
 export default function Billing() {
   const { products, activePromotions, activeLoyaltyTiers, refresh } = useDB();
   const { isOnline, refreshPendingCount }                           = useSync();
-  const { currentUser }                                             = useAuth();
+  const { currentUser, currentBranch }                             = useAuth();
 
   // ── Step 1: customer ─────────────────────────────────────────────────────
   const [phone, setPhone]               = useState('');
@@ -67,6 +86,17 @@ export default function Billing() {
   // ── Step 3: payment + promo ───────────────────────────────────────────────
   const [selectedPromo, setSelectedPromo] = useState('');
   const [payment, setPayment]             = useState('Cash');
+
+  // Filter promotions valid for current branch and current dates
+  const availablePromotions = activePromotions.filter((pr) => {
+    if (pr.branchId && currentBranch?.id && String(pr.branchId) !== String(currentBranch.id)) {
+      return false;
+    }
+    const today = new Date().toISOString().slice(0, 10);
+    if (pr.startDate && String(pr.startDate).slice(0, 10) > today) return false;
+    if (pr.endDate && String(pr.endDate).slice(0, 10) < today) return false;
+    return true;
+  });
 
   // ── output ───────────────────────────────────────────────────────────────
   const [invoice, setInvoice] = useState(null);
@@ -111,8 +141,8 @@ export default function Billing() {
 
   // ── Totals ────────────────────────────────────────────────────────────────
   const subtotal     = cart.reduce((s, i) => s + i.product.price * i.qty, 0);
-  const promo        = activePromotions.find((p) => p.id === selectedPromo) ?? null;
-  const promoDiscount = applyPromotion(subtotal, promo);
+  const promo        = availablePromotions.find((p) => String(p.id) === String(selectedPromo)) ?? null;
+  const promoDiscount = applyPromotion(subtotal, promo, cart);
   const afterPromo   = subtotal - promoDiscount;
 
   // Loyalty: visit count from customer record
@@ -330,7 +360,11 @@ export default function Billing() {
               <div className="flex items-center gap-2 mb-1.5"><Tag size={13} className="text-brand" />Apply Promotion</div>
               <select className="field" value={selectedPromo} onChange={(e) => setSelectedPromo(e.target.value)}>
                 <option value="">— No promotion —</option>
-                {activePromotions.map((pr) => <option key={pr.id} value={pr.id}>{pr.name}</option>)}
+                {availablePromotions.map((pr) => (
+                  <option key={pr.id} value={pr.id}>
+                    {pr.name} ({pr.discountType === 'percent' ? `${pr.value}% off` : `₹${pr.value} off`})
+                  </option>
+                ))}
               </select>
             </label>
 

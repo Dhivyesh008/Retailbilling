@@ -9,10 +9,10 @@ import { createContext, useContext, useState, useCallback, useEffect } from 'rea
 import {
   fetchProducts,
   fetchReturns,
-  fetchPromotions,
 } from '../services/supabaseService.js';
 import { loadCustomers } from '../services/customerService.js';
 import { loadAllBills } from '../services/billingService.js';
+import { loadPromotions } from '../services/promotionService.js';
 import { loyaltyTiersDB, productsDB } from '../db/db.js';
 
 const DBContext = createContext(null);
@@ -54,7 +54,7 @@ export function DBProvider({ children }) {
 
       // 4. Fetch returns, promotions, loyalty tiers
       const retsPromise   = fetchReturns().catch(() => []);
-      const promosPromise = fetchPromotions().catch(() => []);
+      const promosPromise = loadPromotions().catch(() => []);
       const tiersPromise  = loyaltyTiersDB.getAll().catch(() => []);
 
       const [prods, custs, allBills, rets, promos, tiers] = await Promise.all([

@@ -2,6 +2,7 @@ import { syncQueueDB, customersDB, billsDB } from '../db/db.js';
 import { supabase } from '../lib/supabase.js';
 import { mapCustomer, syncOfflineCustomers } from './customerService.js';
 import { syncOfflineBills } from './billingService.js';
+import { syncOfflinePromotions } from './promotionService.js';
 
 /**
  * Pushes a single sync queue entry to the Supabase database.
@@ -66,6 +67,9 @@ export async function runSyncQueue(onProgress) {
 
   // 2. Sync pending offline bills/sales to Supabase
   await syncOfflineBills();
+
+  // 3. Sync pending offline promotions to Supabase
+  await syncOfflinePromotions();
 
   const pending = await syncQueueDB.getPending();
   let processed = 0;

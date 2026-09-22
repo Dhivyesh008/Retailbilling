@@ -312,19 +312,65 @@ export async function fetchPromotions() {
   return (data ?? []).map(mapPromotion);
 }
 
+export async function insertPromotion({ name, discountType, value, productId = null, startDate = null, endDate = null, active = true }) {
+  const { data, error } = await supabase
+    .from('promotions')
+    .insert({
+      name: (name || '').trim(),
+      discount_type: discountType || 'percent',
+      discount_value: parseFloat(value) || 0,
+      product_id: productId ? Number(productId) : null,
+      start_date: startDate || null,
+      end_date: endDate || null,
+      active: active ?? true,
+    })
+    .select()
+    .single();
+  if (error) throw error;
+  return mapPromotion(data);
+}
+
+export async function updatePromotion(id, updates) {
+  const payload = {};
+  if (updates.name !== undefined) payload.name = updates.name.trim();
+  if (updates.discountType !== undefined) payload.discount_type = updates.discountType;
+  if (updates.value !== undefined) payload.discount_value = parseFloat(updates.value);
+  if (updates.productId !== undefined) payload.product_id = updates.productId ? Number(updates.productId) : null;
+  if (updates.startDate !== undefined) payload.start_date = updates.startDate || null;
+  if (updates.endDate !== undefined) payload.end_date = updates.endDate || null;
+  if (updates.active !== undefined) payload.active = updates.active;
+
+  const { data, error } = await supabase
+    .from('promotions')
+    .update(payload)
+    .eq('id', id)
+    .select()
+    .single();
+  if (error) throw error;
+  return mapPromotion(data);
+}
+
+export async function deletePromotion(id) {
+  const { error } = await supabase
+    .from('promotions')
+    .delete()
+    .eq('id', id);
+  if (error) throw error;
+  return true;
+}
+
 function mapPromotion(row) {
   return {
     id:            row.id,
     name:          row.name ?? '',
     discountType:  row.discount_type ?? 'percent',   // 'percent' | 'flat'
     value:         parseFloat(row.discount_value ?? 0),
-    productId:     row.product_id ?? null,
+    productId:     row.product_id ? Number(row.product_id) : null,
     startDate:     row.start_date ?? null,
     endDate:       row.end_date   ?? null,
     active:        row.active ?? false,
-    // legacy aliases used by Billing.jsx
     minCartValue:  0,
-    scope:         'all',
+    scope:         row.product_id ? 'product' : 'all',
   };
 }
 
