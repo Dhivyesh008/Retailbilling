@@ -1,0 +1,1 @@
+export const initialCustomers=[{id:1,name:'Aarav Sharma',phone:'+91 98765 43210',email:'aarav@example.com',purchases:12450,points:1245},{id:2,name:'Diya Mehta',phone:'+91 99887 11223',email:'diya@example.com',purchases:8920,points:892},{id:3,name:'Rohan Gupta',phone:'+91 91234 56780',email:'rohan@example.com',purchases:6750,points:675}];

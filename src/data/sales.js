@@ -1,0 +1,1 @@
+export const weeklySales=[{day:'Mon',sales:32000},{day:'Tue',sales:41000},{day:'Wed',sales:36500},{day:'Thu',sales:48000},{day:'Fri',sales:45250},{day:'Sat',sales:58500},{day:'Sun',sales:51200}]; export const topProducts=[{name:'Milk',sales:842},{name:'Bread',sales:624},{name:'Biscuits',sales:512},{name:'Salt',sales:408}];
