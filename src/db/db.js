@@ -129,6 +129,7 @@ export const customersDB = {
   getAll: () => getAll('customers'),
   getById: (id) => getById('customers', id),
   put: (customer) => put('customers', customer),
+  delete: (id) => del('customers', id),
 
   /** Look up a customer by phone number. Returns null if not found. */
   getByPhone: async (phone) => {

@@ -1,12 +1,13 @@
 import { NavLink, useNavigate } from 'react-router-dom';
 import {
   LayoutDashboard, Receipt, Boxes, Users, RotateCcw,
-  BarChart3, LogOut, Store, ChevronRight, RefreshCw, Building2, Tag,
+  BarChart3, LogOut, Store, ChevronRight, RefreshCw, Building2, Tag, Package,
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext.jsx';
 
 const ALL_LINKS = [
   { to: '/dashboard',   label: 'Dashboard',          Icon: LayoutDashboard, roles: ['Admin','Manager','Staff'] },
+  { to: '/products',    label: 'Products',           Icon: Package,         roles: ['Admin','Manager','Staff'] },
   { to: '/billing',     label: 'Billing',             Icon: Receipt,         roles: ['Admin','Manager','Staff'] },
   { to: '/inventory',   label: 'Inventory',           Icon: Boxes,           roles: ['Admin','Manager','Staff'] },
   { to: '/customers',   label: 'Customers',           Icon: Users,           roles: ['Admin','Manager'] },

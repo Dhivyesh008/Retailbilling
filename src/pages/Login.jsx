@@ -5,7 +5,6 @@ import {
   User, Building2, Lock, AlertCircle,
 } from 'lucide-react';
 import { useAuth }  from '../context/AuthContext.jsx';
-import { storesDB } from '../db/db.js';
 
 const ROLES = ['Admin', 'Manager', 'Cashier', 'Staff'];
 
@@ -20,7 +19,7 @@ function FieldLabel({ icon: Icon, children }) {
 
 export default function Login() {
   const nav = useNavigate();
-  const { loginBranch, loginAdmin } = useAuth();
+  const { loginBranch, loginAdmin, getStores } = useAuth();
 
   const [role, setRole]         = useState('Manager');
   const [stores, setStores]     = useState([]);
@@ -30,11 +29,11 @@ export default function Login() {
   const [loading, setLoading]   = useState(false);
 
   useEffect(() => {
-    storesDB.getAll().then((list) => {
+    getStores().then((list) => {
       setStores(list);
-      if (list.length > 0) setStoreId(list[0].id);
-    });
-  }, []);
+      if (list.length > 0) setStoreId(String(list[0].id));
+    }).catch((err) => console.error('[Login] Failed to load stores:', err));
+  }, [getStores]);
 
   // Admin gets "All Branches" as first option
   const branchOptions = role === 'Admin'
@@ -170,14 +169,9 @@ export default function Login() {
             </button>
           </form>
 
-          {/* Demo hints */}
           <div className="mt-6 space-y-1 border-t border-slate-100 pt-4 text-center text-xs text-slate-400">
             <p>Admin: <code className="rounded bg-slate-100 px-1.5">Admin@9999</code></p>
-            <p>
-              Branch A: <code className="rounded bg-slate-100 px-1.5">branchA@123</code>
-              {' · '}
-              Branch B: <code className="rounded bg-slate-100 px-1.5">branchB@456</code>
-            </p>
+            <p>Manager / Cashier / Staff: <code className="rounded bg-slate-100 px-1.5">store@123</code></p>
           </div>
         </div>
       </div>

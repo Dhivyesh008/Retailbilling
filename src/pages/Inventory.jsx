@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { Search, ArrowDownToLine, ArrowUpFromLine, Boxes, AlertTriangle, Plus, Minus } from 'lucide-react';
 import { useDB } from '../context/DBContext.jsx';
 import { useSync } from '../context/SyncContext.jsx';
-import { stockDB, syncQueueDB } from '../db/db.js';
+import { adjustProductStock } from '../services/supabaseService.js';
 
 export default function Inventory() {
   const { products, loading, refresh } = useDB();
@@ -21,13 +21,15 @@ export default function Inventory() {
   const adjust = async (productId, delta) => {
     if (adjusting[productId]) return;
     setAdjusting((prev) => ({ ...prev, [productId]: true }));
-    await stockDB.adjustStock(productId, delta);
-    if (!isOnline) {
-      await syncQueueDB.enqueue('stock', productId, delta > 0 ? 'STOCK_IN' : 'STOCK_OUT');
-      await refreshPendingCount();
+    try {
+      await adjustProductStock(productId, delta);
+      await refresh();
+    } catch (err) {
+      console.error('[Inventory] Stock adjust failed:', err);
+      alert(`Could not update stock: ${err.message}`);
+    } finally {
+      setAdjusting((prev) => ({ ...prev, [productId]: false }));
     }
-    await refresh();
-    setAdjusting((prev) => ({ ...prev, [productId]: false }));
   };
 
   const handleCustomAdj = async (productId, sign) => {
@@ -72,7 +74,7 @@ export default function Inventory() {
       <section className="card overflow-hidden">
         <div className="flex items-center justify-between border-b border-slate-100 p-5">
           <h2 className="font-bold">Product Inventory</h2>
-          <span className="text-xs text-slate-400"><Boxes size={14} className="inline mr-1" />Live local state (IndexedDB)</span>
+          <span className="text-xs text-slate-400"><Boxes size={14} className="inline mr-1" />Live — synced with Supabase</span>
         </div>
 
         <div className="divide-y divide-slate-100">

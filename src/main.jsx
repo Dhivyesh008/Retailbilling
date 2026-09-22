@@ -2,21 +2,45 @@ import React, { useState, useEffect } from 'react';
 import ReactDOM from 'react-dom/client';
 import App from './App.jsx';
 import './index.css';
-import { seedIfNeeded } from './db/seed.js';
 import { Store, Wifi } from 'lucide-react';
+import { supabase } from './lib/supabase.js';
+
+// Seed loyalty tiers into IndexedDB only — products/customers come from Supabase now
+import { loyaltyTiersDB } from './db/db.js';
+
+const LOYALTY_SEED_FLAG = 'retailsync_loyalty_seeded_v1';
+
+async function seedLoyaltyTiersIfNeeded() {
+  if (localStorage.getItem(LOYALTY_SEED_FLAG)) return;
+  const tiers = [
+    { id: 'lt-001', label: 'Silver', minVisits: 3, discountPercent: 5,  active: true },
+    { id: 'lt-002', label: 'Gold',   minVisits: 7, discountPercent: 10, active: true },
+  ];
+  for (const t of tiers) await loyaltyTiersDB.put(t);
+  localStorage.setItem(LOYALTY_SEED_FLAG, '1');
+}
 
 function SeedLoader({ children }) {
-  const [ready, setReady] = useState(false);
-  const [seeding, setSeeding] = useState(false);
+  const [ready,  setReady]  = useState(false);
+  const [status, setStatus] = useState('Connecting to database…');
 
   useEffect(() => {
     async function init() {
-      const wasFresh = await seedIfNeeded();
-      if (wasFresh) {
-        setSeeding(true);
-        // Show "syncing" screen briefly to simulate initial data pull
-        await new Promise((r) => setTimeout(r, 1800));
-        setSeeding(false);
+      try {
+        // 1. Verify Supabase connectivity
+        setStatus('Connecting to Supabase…');
+        const { error } = await supabase.from('products').select('id').limit(1);
+        if (error) throw error;
+
+        // 2. Seed local loyalty tiers (one-time)
+        setStatus('Initialising local settings…');
+        await seedLoyaltyTiersIfNeeded();
+
+        setStatus('Ready!');
+      } catch (err) {
+        console.error('[Init] Startup error:', err);
+        setStatus(`Connection error: ${err.message}`);
+        // Still proceed — offline mode will gracefully show empty state
       }
       setReady(true);
     }
@@ -51,13 +75,13 @@ function SeedLoader({ children }) {
             background: '#fff', border: '1px solid #e6eaf4', borderRadius: 16,
             padding: '14px 24px', boxShadow: '0 8px 30px #24346410',
           }}>
-            <Wifi size={18} color="#335CFF" className="animate-pulse" />
+            <Wifi size={18} color="#335CFF" style={{ animation: 'pulse 1.5s infinite' }} />
             <span style={{ fontSize: 14, fontWeight: 600, color: '#335CFF' }}>
-              {seeding ? 'Syncing initial data…' : 'Initialising database…'}
+              {status}
             </span>
           </div>
           <p style={{ marginTop: 16, fontSize: 12, color: '#94a3b8' }}>
-            Setting up your offline store. This happens once.
+            Powered by Supabase
           </p>
         </div>
       </div>

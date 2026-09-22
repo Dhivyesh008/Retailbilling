@@ -9,9 +9,10 @@ const STATUS_MAP = {
 };
 
 const ENTITY_ICONS = {
-  bill:   '🧾',
-  stock:  '📦',
-  return: '↩️',
+  customer: '👤',
+  bill:     '🧾',
+  stock:    '📦',
+  return:   '↩️',
 };
 
 export default function SyncQueue() {

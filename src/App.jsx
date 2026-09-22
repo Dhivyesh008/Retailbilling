@@ -12,6 +12,7 @@ import Returns from './pages/Returns.jsx';
 import Reports from './pages/Reports.jsx';
 import SyncQueue from './pages/SyncQueue.jsx';
 import PromotionsLoyalty from './pages/PromotionsLoyalty.jsx';
+import Products from './pages/Products.jsx';
 
 // ── Guards ────────────────────────────────────────────────────────────────────
 
@@ -45,31 +46,21 @@ export default function App() {
         <DBProvider>
           <BrowserRouter>
             <Routes>
-              <Route path="/" element={<Login />} />
-
-              <Route element={<ProtectedRoute />}>
-                <Route element={<Layout />}>
-
-                  {/* ── Billing — open to ALL authenticated roles ── */}
-                  <Route path="billing" element={<Billing />} />
-
-                  {/* ── Everything else — Cashiers are hard-redirected ── */}
-                  <Route element={<NonCashierRoute />}>
-                    <Route path="dashboard"  element={<Dashboard />} />
-                    <Route path="inventory"  element={<Inventory />} />
-                    <Route path="customers"  element={<Customers />} />
-                    <Route path="returns"    element={<Returns />} />
-                    <Route path="reports"    element={<Reports />} />
-                    <Route element={<ManagerRoute />}>
-                      <Route path="sync-queue"   element={<SyncQueue />} />
-                      <Route path="promotions"   element={<PromotionsLoyalty />} />
-                    </Route>
-                  </Route>
-
-                  {/* ── Catch-all: Cashier → billing, others → dashboard ── */}
-                  <Route path="*" element={<CatchAll />} />
-                </Route>
+              {/* Main Layout containing Products as the primary startup page */}
+              <Route element={<Layout />}>
+                <Route index element={<Products />} />
+                <Route path="products" element={<Products />} />
+                <Route path="dashboard" element={<Dashboard />} />
+                <Route path="billing" element={<Billing />} />
+                <Route path="inventory" element={<Inventory />} />
+                <Route path="customers" element={<Customers />} />
+                <Route path="returns" element={<Returns />} />
+                <Route path="reports" element={<Reports />} />
+                <Route path="sync-queue" element={<SyncQueue />} />
+                <Route path="promotions" element={<PromotionsLoyalty />} />
               </Route>
+              <Route path="login" element={<Login />} />
+              <Route path="*" element={<Navigate to="/" replace />} />
             </Routes>
           </BrowserRouter>
         </DBProvider>

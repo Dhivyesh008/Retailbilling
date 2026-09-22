@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { Search, RotateCcw, Package, CheckCircle } from 'lucide-react';
 import { useDB } from '../context/DBContext.jsx';
 import { useSync } from '../context/SyncContext.jsx';
-import { returnsDB, stockDB, syncQueueDB } from '../db/db.js';
+import { insertReturn, adjustProductStock } from '../services/supabaseService.js';
 
 export default function Returns() {
   const { bills, products, loading, refresh } = useDB();
@@ -38,41 +38,42 @@ export default function Returns() {
     if (!selectedBill || !reason || Object.keys(selectedItems).length === 0 || processing) return;
     setProcessing(true);
 
-    const returnId = `ret-${Date.now()}`;
-    const status = isOnline ? 'SYNCED' : 'PENDING_SYNC';
+    try {
+      const entries = Object.entries(selectedItems);
 
-    const returnRecord = {
-      id: returnId,
-      billId: selectedBill.id,
-      items: Object.entries(selectedItems).map(([productId, qty]) => {
-        const item = selectedBill.items.find((i) => i.productId === productId);
-        return { productId, name: item?.name, qty };
-      }),
-      reason,
-      timestamp: new Date().toISOString(),
-      status,
-    };
+      // 1. Insert one return row per product into Supabase
+      const returnIds = [];
+      for (const [productId, qty] of entries) {
+        const item = selectedBill.items?.find((i) => String(i.productId) === String(productId));
+        const refund = (item?.price ?? 0) * qty;
+        const ret = await insertReturn({
+          saleId:       selectedBill.id,
+          productId:    productId,
+          quantity:     qty,
+          refundAmount: refund,
+          reason,
+        });
+        returnIds.push(ret.id);
+      }
 
-    // Save return
-    await returnsDB.put(returnRecord);
+      // 2. Restock each returned product in Supabase
+      await Promise.all(
+        entries.map(([productId, qty]) => adjustProductStock(productId, qty))
+      );
 
-    // Restock
-    for (const [productId, qty] of Object.entries(selectedItems)) {
-      await stockDB.adjustStock(productId, qty);
+      // 3. Refresh context
+      await refresh();
+
+      setSuccess(returnIds.join(', '));
+      setSelectedBill(null);
+      setSelectedItems({});
+      setReason('');
+    } catch (err) {
+      console.error('[Returns] processReturn failed:', err);
+      alert(`Return could not be saved: ${err.message}`);
+    } finally {
+      setProcessing(false);
     }
-
-    // Enqueue if offline
-    if (!isOnline) {
-      await syncQueueDB.enqueue('return', returnId, 'CREATE');
-      await refreshPendingCount();
-    }
-
-    await refresh();
-    setSuccess(returnId);
-    setSelectedBill(null);
-    setSelectedItems({});
-    setReason('');
-    setProcessing(false);
   };
 
   const productName = (id) => products.find((p) => p.id === id)?.name ?? id;

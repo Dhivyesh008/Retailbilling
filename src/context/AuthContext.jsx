@@ -1,9 +1,16 @@
+/**
+ * AuthContext.jsx
+ *
+ * Authentication provider.
+ * - Admin login: password checked against hardcoded value (or Supabase users table).
+ * - Branch login: store + user record validated against Supabase `users` table.
+ * - Session is persisted in localStorage for page reloads.
+ */
 import { createContext, useContext, useState, useCallback } from 'react';
-import { storesDB } from '../db/db.js';
+import { fetchStores, validateStorePassword } from '../services/supabaseService.js';
 
-const AuthContext  = createContext(null);
-const SESSION_KEY  = 'retailsync_session';
-// Demo admin password — in production this would be a backend check
+const AuthContext = createContext(null);
+const SESSION_KEY = 'retailsync_session';
 const ADMIN_PASSWORD = 'Admin@9999';
 
 function loadSession() {
@@ -19,14 +26,16 @@ export function AuthProvider({ children }) {
   const [currentBranch, setCurrentBranch] = useState(saved?.branch ?? null);
 
   /**
-   * Login for Manager / Cashier / Staff.
-   * Role is selected in Step 0; branch + password validated here.
-   * Session user is a synthetic object { role, storeId } — no individual ID.
+   * Login for Manager / Cashier / Staff roles.
+   * Validates against Supabase `users` table (password_hash field).
    */
   const loginBranch = useCallback(async ({ role, storeId, branchPassword }) => {
-    const branch = await storesDB.validatePassword(storeId, branchPassword);
-    if (!branch) throw new Error('Incorrect branch password. Please try again.');
-    const user    = { role, name: role, storeId: branch.id };
+    if (!storeId) throw new Error('Please select a branch.');
+    const result = await validateStorePassword(storeId, branchPassword, role);
+    if (!result) throw new Error('Incorrect branch password. Please try again.');
+
+    const branch = { id: result.id, name: result.name, location: result.location };
+    const user   = { id: result.userId, role, name: result.userName || role, storeId: branch.id };
     const session = { user, branch };
     localStorage.setItem(SESSION_KEY, JSON.stringify(session));
     setCurrentUser(user);
@@ -35,18 +44,23 @@ export function AuthProvider({ children }) {
   }, []);
 
   /**
-   * Admin login — not tied to any branch by default.
-   * Pass a branch record to scope the admin's session to that branch.
+   * Admin login — checks the hardcoded admin password.
+   * Optionally scoped to a branch.
    */
   const loginAdmin = useCallback(async (password, branch = null) => {
     if (password !== ADMIN_PASSWORD) throw new Error('Incorrect admin password.');
-    const user    = { role: 'Admin', name: 'Admin', storeId: branch?.id ?? null };
+    const user    = { id: 1, role: 'Admin', name: 'Admin', storeId: branch?.id ?? null };
     const session = { user, branch };
     localStorage.setItem(SESSION_KEY, JSON.stringify(session));
     setCurrentUser(user);
     setCurrentBranch(branch);
     return user;
   }, []);
+
+  /**
+   * Fetch all stores from Supabase for the login branch selector.
+   */
+  const getStores = useCallback(() => fetchStores(), []);
 
   const logout = useCallback(() => {
     localStorage.removeItem(SESSION_KEY);
@@ -63,7 +77,7 @@ export function AuthProvider({ children }) {
   return (
     <AuthContext.Provider value={{
       currentUser, currentBranch,
-      loginBranch, loginAdmin, logout,
+      loginBranch, loginAdmin, getStores, logout,
       isAdmin, isManager, isCashier, isStaff, canManage,
     }}>
       {children}

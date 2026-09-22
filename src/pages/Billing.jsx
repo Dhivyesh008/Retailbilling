@@ -6,7 +6,12 @@ import {
 import { useDB }   from '../context/DBContext.jsx';
 import { useSync } from '../context/SyncContext.jsx';
 import { useAuth } from '../context/AuthContext.jsx';
-import { billsDB, stockDB, customersDB, syncQueueDB } from '../db/db.js';
+import {
+  incrementLoyaltyPoints,
+  insertSale,
+  adjustProductStock,
+} from '../services/supabaseService.js';
+import { findCustomerByPhone, saveCustomer } from '../services/customerService.js';
 import { calcLoyaltyDiscount } from '../constants/loyalty.js';
 import InvoiceModal from '../components/InvoiceModal.jsx';
 
@@ -79,9 +84,14 @@ export default function Billing() {
 
     phoneDebounce.current = setTimeout(async () => {
       setLookingUp(true);
-      const found = await customersDB.getByPhone(phone.trim());
-      if (found) { setCustomer(found); setCustomerName(found.name || ''); }
-      setLookingUp(false);
+      try {
+        const found = await findCustomerByPhone(phone.trim(), isOnline);
+        if (found) { setCustomer(found); setCustomerName(found.name || ''); }
+      } catch (err) {
+        console.error('[Billing] Phone lookup failed:', err);
+      } finally {
+        setLookingUp(false);
+      }
     }, 600);
 
     return () => clearTimeout(phoneDebounce.current);
@@ -125,77 +135,103 @@ export default function Billing() {
     if (!cart.length || !phone.trim() || saving) return;
     setSaving(true);
 
-    const status = isOnline ? 'SYNCED' : 'PENDING_SYNC';
-    const billId = `bill-${Date.now()}`;
+    try {
+      // 1. Resolve or create customer (offline to IndexedDB or online to Supabase)
+      let resolvedCustomer = customer;
+      if (!resolvedCustomer) {
+        resolvedCustomer = await saveCustomer({
+          name:  customerName.trim() || '',
+          phone: phone.trim(),
+          email: '',
+        }, isOnline);
+      }
 
-    // Resolve or create customer
-    let resolvedCustomer = customer;
-    if (!resolvedCustomer) {
-      const newCust = {
-        id: `c-${Date.now()}`,
-        name: customerName.trim() || '',
-        phone: phone.trim(),
-        email: '',
-        purchaseHistory: [],
-        loyaltyPoints: 0,   // visit count starts at 0
+      // 2. Generate invoice number
+      const invoiceNumber = `INV-${Date.now()}`;
+      const totalDiscount = promoDiscount + loyaltyDiscount;
+
+      // 3. Insert sale + items into Supabase
+      // Sanitize IDs — Supabase uses bigint; old sessions may have string IDs like "store-a"
+      const toNumericId = (v) => {
+        const n = parseInt(v, 10);
+        return isNaN(n) ? null : n;
       };
-      await customersDB.put(newCust);
-      resolvedCustomer = newCust;
+
+      const saleId = await insertSale({
+        invoiceNumber,
+        customerId:    resolvedCustomer.id,
+        cashierId:     toNumericId(currentUser?.id),
+        storeId:       toNumericId(currentUser?.storeId),
+        subtotal,
+        discount:      totalDiscount,
+        tax:           0,
+        total,
+        paymentMethod: payment,
+        status:        'completed',
+        syncStatus:    isOnline ? 'synced' : 'pending',
+        items: cart.map((i) => ({
+          productId: i.product.id,
+          name:      i.product.name,
+          price:     i.product.price,
+          qty:       i.qty,
+          category:  i.product.category,
+        })),
+      });
+
+      // 4. Reduce stock in Supabase for each item
+      await Promise.all(
+        cart.map((i) => adjustProductStock(i.product.id, -i.qty))
+      );
+
+      // 5. Increment loyalty points (+1 visit) in Supabase
+      await incrementLoyaltyPoints(resolvedCustomer.id, 1);
+
+      // 6. Build local invoice object for the receipt modal
+      const bill = {
+        id:            String(saleId),
+        invoiceNumber,
+        items: cart.map((i) => ({
+          productId: i.product.id,
+          name:      i.product.name,
+          price:     i.product.price,
+          qty:       i.qty,
+          category:  i.product.category,
+        })),
+        subtotal,
+        promoDiscount,
+        loyaltyDiscount,
+        discount:      totalDiscount,
+        total,
+        payment,
+        customerPhone: phone.trim(),
+        customerName:  customerName.trim() || resolvedCustomer.name || '',
+        customerId:    resolvedCustomer.id,
+        cashierId:     currentUser?.id,
+        promoId:       promo?.id ?? null,
+        visitsAfter,
+        loyaltyTierId: tier?.id ?? null,
+        timestamp:     new Date().toISOString(),
+        status:        isOnline ? 'SYNCED' : 'PENDING_SYNC',
+      };
+
+      // 7. Refresh context so dashboard / inventory updates
+      await refresh();
+
+      setInvoice({
+        bill, cart, subtotal, promoDiscount, loyaltyDiscount, total, payment,
+        promo, tier, visitsAfter,
+        customerPhone: phone.trim(),
+        customerName:  customerName.trim() || resolvedCustomer.name || '',
+      });
+
+      setCart([]); setSelectedPromo(''); setPhone('');
+      setCustomerName(''); setCustomer(null);
+    } catch (err) {
+      console.error('[Billing] completeSale failed:', err);
+      alert(`Sale could not be saved: ${err.message}`);
+    } finally {
+      setSaving(false);
     }
-
-    const bill = {
-      id:           billId,
-      items:        cart.map((i) => ({
-                      productId: i.product.id,
-                      name:      i.product.name,
-                      price:     i.product.price,
-                      qty:       i.qty,
-                      category:  i.product.category,
-                    })),
-      subtotal,
-      promoDiscount,
-      loyaltyDiscount,
-      discount:     promoDiscount + loyaltyDiscount,
-      total,
-      payment,
-      customerPhone:    phone.trim(),
-      customerName:     customerName.trim() || resolvedCustomer.name || '',
-      customerId:       resolvedCustomer.id,
-      cashierId:        currentUser?.id,
-      promoId:          promo?.id ?? null,
-      visitsAfter,          // +1 per sale, recorded for audit
-      loyaltyTierId:    tier?.id ?? null,
-      timestamp:        new Date().toISOString(),
-      status,
-    };
-
-    await billsDB.put(bill);
-
-    for (const item of cart) {
-      await stockDB.adjustStock(item.product.id, -item.qty);
-    }
-
-    // +1 visit to loyaltyPoints
-    await customersDB.recordSale(resolvedCustomer.id, billId, 1);
-
-    if (!isOnline) {
-      await syncQueueDB.enqueue('bill',     billId,              'CREATE');
-      await syncQueueDB.enqueue('customer', resolvedCustomer.id, 'UPDATE');
-      await refreshPendingCount();
-    }
-
-    await refresh();
-
-    setInvoice({
-      bill, cart, subtotal, promoDiscount, loyaltyDiscount, total, payment,
-      promo, tier, visitsAfter,
-      customerPhone: phone.trim(),
-      customerName:  customerName.trim() || resolvedCustomer.name || '',
-    });
-
-    setCart([]); setSelectedPromo(''); setPhone('');
-    setCustomerName(''); setCustomer(null);
-    setSaving(false);
   }, [
     cart, phone, customerName, customer, saving, isOnline,
     subtotal, promoDiscount, loyaltyDiscount, total, payment,
