@@ -1,20 +1,21 @@
 /**
  * BarcodeScannerModal.jsx
  *
- * Camera-based Barcode Scanner for Point-of-Sale Billing:
- * - Uses laptop/webcam camera via Html5Qrcode to scan physical product barcodes.
- * - Audio feedback (crisp POS beep via Web Audio API).
- * - Visual scanning laser line and green flash indicator on successful detection.
- * - Automatic matching against Supabase PostgreSQL database products.
- * - Renders 3 sample database product barcodes (Milk, Bread, Rice 5kg) for instant scanning & testing.
+ * Full-featured Barcode Scanner for Point-of-Sale Billing:
+ * 1. Live Laptop / Webcam Camera Scanning (with native BarcodeDetector acceleration, reticle, and laser guide).
+ * 2. Barcode Image Upload (Drag-and-drop or select an image / screenshot of a barcode).
+ * 3. Audio & Visual POS feedback (authentic beep and green border pulse).
+ * 4. 3 Sample Database Products (Milk, Bread, Rice 5kg) with live scannable SVG barcodes, instant scan simulation, and one-click image download for testing.
+ * 5. Automatic matching with Supabase PostgreSQL products database.
  */
 
 import { useState, useEffect, useRef } from 'react';
 import { Html5Qrcode, Html5QrcodeSupportedFormats } from 'html5-qrcode';
 import JsBarcode from 'jsbarcode';
 import {
-  Camera, X, Volume2, VolumeX, CheckCircle, AlertTriangle,
-  RotateCcw, Sparkles, ShoppingCart, HelpCircle, ExternalLink, RefreshCw
+  Camera, UploadCloud, X, Volume2, VolumeX, CheckCircle2, AlertTriangle,
+  Sparkles, ShoppingCart, HelpCircle, Image as ImageIcon, Download,
+  RefreshCw, Info, Check, FileCheck
 } from 'lucide-react';
 
 /** Web Audio API Beep Generator */
@@ -27,7 +28,7 @@ function playPosBeep() {
     const gain = ctx.createGain();
 
     osc.type = 'sine';
-    osc.frequency.setValueAtTime(950, ctx.currentTime); // 950Hz retail beep
+    osc.frequency.setValueAtTime(950, ctx.currentTime);
     gain.gain.setValueAtTime(0.25, ctx.currentTime);
     gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.12);
 
@@ -35,13 +36,13 @@ function playPosBeep() {
     gain.connect(ctx.destination);
     osc.start();
     osc.stop(ctx.currentTime + 0.12);
-  } catch (err) {
-    // AudioContext might be blocked until user gesture
+  } catch {
+    // AudioContext blocked before user interaction
   }
 }
 
 /** Component to render real SVG barcodes using JsBarcode */
-function ProductBarcodeSvg({ barcode, label }) {
+function ProductBarcodeSvg({ barcode, label, onDownload }) {
   const svgRef = useRef(null);
 
   useEffect(() => {
@@ -75,10 +76,38 @@ function ProductBarcodeSvg({ barcode, label }) {
     }
   }, [barcode]);
 
+  const handleSave = () => {
+    if (!svgRef.current) return;
+    try {
+      const svgData = new XMLSerializer().serializeToString(svgRef.current);
+      const svgBlob = new Blob([svgData], { type: 'image/svg+xml;charset=utf-8' });
+      const svgUrl = URL.createObjectURL(svgBlob);
+      const link = document.createElement('a');
+      link.href = svgUrl;
+      link.download = `barcode_${label.replace(/\s+/g, '_')}_${barcode}.svg`;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      URL.revokeObjectURL(svgUrl);
+    } catch (err) {
+      console.warn('Failed to download barcode:', err);
+    }
+  };
+
   return (
-    <div className="flex flex-col items-center bg-white rounded-lg p-2 border border-slate-200 shadow-xs">
+    <div className="flex flex-col items-center bg-white rounded-lg p-2 border border-slate-200 shadow-xs relative group">
       <svg ref={svgRef} className="max-w-full" />
-      <span className="text-[11px] font-bold text-slate-600 mt-1 truncate max-w-[140px]">{label}</span>
+      <div className="flex items-center justify-between w-full mt-1 px-1">
+        <span className="text-[11px] font-bold text-slate-700 truncate max-w-[110px]">{label}</span>
+        <button
+          type="button"
+          onClick={handleSave}
+          title="Download barcode image"
+          className="text-slate-400 hover:text-brand p-0.5 rounded transition"
+        >
+          <Download size={12} />
+        </button>
+      </div>
     </div>
   );
 }
@@ -88,27 +117,36 @@ export default function BarcodeScannerModal({
   onClose,
   products = [],
   onProductScanned,
+  initialTab = 'camera', // 'camera' or 'upload'
 }) {
+  const [activeTab, setActiveTab]       = useState(initialTab); // 'camera' | 'upload'
   const [cameras, setCameras]           = useState([]);
   const [selectedCam, setSelectedCam]   = useState('');
   const [cameraActive, setCameraActive] = useState(false);
   const [cameraError, setCameraError]   = useState('');
   const [soundEnabled, setSoundEnabled] = useState(true);
-  const [lastScanned, setLastScanned]   = useState(null); // { product, code, time }
+  const [lastScanned, setLastScanned]   = useState(null); // { success, product, code, time }
   const [flashSuccess, setFlashSuccess] = useState(false);
   const [manualCode, setManualCode]     = useState('');
   const [showExamples, setShowExamples] = useState(true);
 
-  const scannerRef     = useRef(null);
-  const lastScanTimeRef = useRef(0);
-  const lastCodeRef    = useRef('');
+  // Upload image state
+  const [uploadLoading, setUploadLoading] = useState(false);
+  const [uploadError, setUploadError]     = useState('');
+  const [uploadedPreview, setUploadedPreview] = useState(null);
+  const [isDragging, setIsDragging]       = useState(false);
 
-  // 3 sample products from database (Milk, Bread, Rice 5kg or first 3 with barcodes)
+  const scannerRef      = useRef(null);
+  const lastScanTimeRef = useRef(0);
+  const lastCodeRef     = useRef('');
+  const fileInputRef    = useRef(null);
+
+  // 3 sample products from database (Milk, Bread, Rice 5kg)
   const sampleProducts = products
     .filter((p) => p.barcode && p.barcode.trim())
     .slice(0, 3);
 
-  // Initialize camera list when modal opens
+  // Discover webcams when modal opens
   useEffect(() => {
     if (!isOpen) return;
 
@@ -118,7 +156,6 @@ export default function BarcodeScannerModal({
         if (!isMounted) return;
         if (devices && devices.length) {
           setCameras(devices);
-          // Prefer environment (back) camera or first camera
           const envCam = devices.find((d) => d.label.toLowerCase().includes('back') || d.label.toLowerCase().includes('environment'));
           setSelectedCam(envCam ? envCam.id : devices[0].id);
         } else {
@@ -134,9 +171,9 @@ export default function BarcodeScannerModal({
     return () => { isMounted = false; };
   }, [isOpen]);
 
-  // Start / Stop camera when selectedCam changes or modal opens/closes
+  // Start / Stop camera when in camera tab
   useEffect(() => {
-    if (!isOpen || !selectedCam) return;
+    if (!isOpen || activeTab !== 'camera' || !selectedCam) return;
 
     const html5QrCode = new Html5Qrcode('barcode-reader-viewport', {
       formatsToSupport: [
@@ -149,12 +186,18 @@ export default function BarcodeScannerModal({
         Html5QrcodeSupportedFormats.QR_CODE,
       ],
       verbose: false,
+      experimentalFeatures: {
+        useBarCodeDetectorIfSupported: true,
+      },
     });
     scannerRef.current = html5QrCode;
 
     const config = {
-      fps: 12,
-      qrbox: { width: 280, height: 180 },
+      fps: 20,
+      qrbox: (viewfinderWidth, viewfinderHeight) => ({
+        width: Math.min(320, Math.floor(viewfinderWidth * 0.85)),
+        height: Math.min(200, Math.floor(viewfinderHeight * 0.7)),
+      }),
       aspectRatio: 1.333,
     };
 
@@ -165,9 +208,7 @@ export default function BarcodeScannerModal({
         (decodedText) => {
           handleDecodedBarcode(decodedText);
         },
-        () => {
-          // ignore frame decode misses
-        }
+        () => {}
       )
       .then(() => {
         setCameraActive(true);
@@ -191,15 +232,15 @@ export default function BarcodeScannerModal({
       }
       setCameraActive(false);
     };
-  }, [isOpen, selectedCam]);
+  }, [isOpen, activeTab, selectedCam]);
 
-  // Process detected barcode
+  // Process detected or entered barcode
   const handleDecodedBarcode = (code) => {
     const cleanCode = String(code).trim();
     if (!cleanCode) return;
 
     const now = Date.now();
-    // 1.8s debounce for the exact same barcode to avoid duplicate rapid additions
+    // 1.8s debounce for the exact same barcode
     if (cleanCode === lastCodeRef.current && (now - lastScanTimeRef.current) < 1800) {
       return;
     }
@@ -207,7 +248,7 @@ export default function BarcodeScannerModal({
     lastCodeRef.current = cleanCode;
     lastScanTimeRef.current = now;
 
-    // Search in database products (match barcode or sku)
+    // Search in database products (match barcode, sku, or id)
     const matched = products.find(
       (p) => String(p.barcode).trim() === cleanCode || String(p.sku).trim() === cleanCode || String(p.id) === cleanCode
     );
@@ -216,7 +257,6 @@ export default function BarcodeScannerModal({
       playPosBeep();
     }
 
-    // Trigger visual success flash
     setFlashSuccess(true);
     setTimeout(() => setFlashSuccess(false), 500);
 
@@ -238,6 +278,88 @@ export default function BarcodeScannerModal({
     }
   };
 
+  // Decode barcode from image file
+  const processImageFile = async (file) => {
+    if (!file || !file.type.startsWith('image/')) {
+      setUploadError('Please select a valid image file (PNG, JPG, WEBP).');
+      return;
+    }
+
+    setUploadLoading(true);
+    setUploadError('');
+
+    // Preview
+    const reader = new FileReader();
+    reader.onload = (e) => setUploadedPreview(e.target.result);
+    reader.readAsDataURL(file);
+
+    let decodedText = null;
+
+    // 1. First try native BarcodeDetector API if supported
+    if ('BarcodeDetector' in window) {
+      try {
+        const formats = await window.BarcodeDetector.getSupportedFormats?.() || [
+          'ean_13', 'ean_8', 'code_128', 'code_39', 'upc_a', 'upc_e', 'qr_code'
+        ];
+        const detector = new window.BarcodeDetector({ formats });
+        const imageBitmap = await createImageBitmap(file);
+        const barcodes = await detector.detect(imageBitmap);
+        if (barcodes.length > 0 && barcodes[0].rawValue) {
+          decodedText = barcodes[0].rawValue;
+        }
+      } catch (detErr) {
+        console.warn('BarcodeDetector error:', detErr);
+      }
+    }
+
+    // 2. Fallback to Html5Qrcode.scanFile
+    if (!decodedText) {
+      try {
+        const fileScanner = new Html5Qrcode('barcode-file-scan-temp', {
+          formatsToSupport: [
+            Html5QrcodeSupportedFormats.EAN_13,
+            Html5QrcodeSupportedFormats.EAN_8,
+            Html5QrcodeSupportedFormats.CODE_128,
+            Html5QrcodeSupportedFormats.CODE_39,
+            Html5QrcodeSupportedFormats.UPC_A,
+            Html5QrcodeSupportedFormats.UPC_E,
+            Html5QrcodeSupportedFormats.QR_CODE,
+          ],
+          verbose: false,
+          experimentalFeatures: {
+            useBarCodeDetectorIfSupported: true,
+          },
+        });
+
+        decodedText = await fileScanner.scanFile(file, false);
+        fileScanner.clear();
+      } catch (scanErr) {
+        console.warn('Html5Qrcode.scanFile error:', scanErr);
+      }
+    }
+
+    setUploadLoading(false);
+
+    if (decodedText) {
+      setUploadError('');
+      handleDecodedBarcode(decodedText);
+    } else {
+      setUploadError('Could not detect a barcode in this image. Please ensure the barcode is clear, centered, and well-lit.');
+    }
+  };
+
+  const handleFileChange = (e) => {
+    const file = e.target.files?.[0];
+    if (file) processImageFile(file);
+  };
+
+  const handleDrop = (e) => {
+    e.preventDefault();
+    setIsDragging(false);
+    const file = e.dataTransfer?.files?.[0];
+    if (file) processImageFile(file);
+  };
+
   const handleManualSubmit = (e) => {
     e.preventDefault();
     if (manualCode.trim()) {
@@ -252,6 +374,9 @@ export default function BarcodeScannerModal({
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 backdrop-blur-xs p-4 overflow-y-auto animate-in fade-in duration-200">
       <div className="relative w-full max-w-2xl rounded-2xl bg-white shadow-2xl overflow-hidden my-4 border border-slate-200">
 
+        {/* Hidden container for temp file decoding */}
+        <div id="barcode-file-scan-temp" className="hidden" />
+
         {/* Header */}
         <div className="flex items-center justify-between border-b border-slate-100 bg-slate-50/80 px-6 py-4">
           <div className="flex items-center gap-2.5">
@@ -259,8 +384,8 @@ export default function BarcodeScannerModal({
               <Camera size={18} />
             </div>
             <div>
-              <h3 className="font-extrabold text-base text-slate-800">Barcode Scanner (Laptop Camera)</h3>
-              <p className="text-xs text-slate-500">Scan product barcodes with your webcam to instantly add items to the cart</p>
+              <h3 className="font-extrabold text-base text-slate-800">Barcode Scanner & Image Reader</h3>
+              <p className="text-xs text-slate-500">Scan with your webcam or upload a barcode image to add items to the cart</p>
             </div>
           </div>
 
@@ -281,77 +406,185 @@ export default function BarcodeScannerModal({
           </div>
         </div>
 
+        {/* Mode Selector Tabs (Camera vs Upload Image) */}
+        <div className="flex border-b border-slate-200 bg-slate-100/60 px-6 pt-3 gap-2">
+          <button
+            type="button"
+            onClick={() => setActiveTab('camera')}
+            className={`flex items-center gap-2 px-4 py-2 text-xs font-bold rounded-t-xl transition-colors border-t border-x ${
+              activeTab === 'camera'
+                ? 'bg-white text-brand border-slate-200 shadow-xs'
+                : 'text-slate-600 hover:text-slate-900 border-transparent'
+            }`}
+          >
+            <Camera size={15} />
+            Live Laptop Camera
+          </button>
+          <button
+            type="button"
+            onClick={() => setActiveTab('upload')}
+            className={`flex items-center gap-2 px-4 py-2 text-xs font-bold rounded-t-xl transition-colors border-t border-x ${
+              activeTab === 'upload'
+                ? 'bg-white text-brand border-slate-200 shadow-xs'
+                : 'text-slate-600 hover:text-slate-900 border-transparent'
+            }`}
+          >
+            <UploadCloud size={15} />
+            Upload Barcode Image
+          </button>
+        </div>
+
         {/* Body */}
         <div className="p-6 space-y-5">
 
-          {/* Camera Selection & Status */}
-          {cameras.length > 1 && (
-            <div className="flex items-center gap-2 text-xs">
-              <span className="font-bold text-slate-600">Camera:</span>
-              <select
-                className="field text-xs py-1"
-                value={selectedCam}
-                onChange={(e) => setSelectedCam(e.target.value)}
+          {/* TAB 1: LIVE CAMERA */}
+          {activeTab === 'camera' && (
+            <div className="space-y-3">
+              {cameras.length > 1 && (
+                <div className="flex items-center justify-between text-xs">
+                  <div className="flex items-center gap-2">
+                    <span className="font-bold text-slate-600">Camera Device:</span>
+                    <select
+                      className="field text-xs py-1"
+                      value={selectedCam}
+                      onChange={(e) => setSelectedCam(e.target.value)}
+                    >
+                      {cameras.map((c) => (
+                        <option key={c.id} value={c.id}>
+                          {c.label || `Camera ${c.id.slice(0, 5)}`}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                </div>
+              )}
+
+              {/* Viewport with Animated Laser and Reticle */}
+              <div
+                className="relative overflow-hidden rounded-2xl bg-slate-950 border-2 transition-all duration-300"
+                style={{
+                  borderColor: flashSuccess ? '#10b981' : '#3b82f6',
+                  boxShadow: flashSuccess ? '0 0 25px rgba(16,185,129,0.5)' : 'none',
+                }}
               >
-                {cameras.map((c) => (
-                  <option key={c.id} value={c.id}>
-                    {c.label || `Camera ${c.id.slice(0, 5)}`}
-                  </option>
-                ))}
-              </select>
+                <div id="barcode-reader-viewport" className="w-full min-h-[250px] max-h-[320px]" />
+
+                {cameraActive && (
+                  <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
+                    <div className="relative w-64 h-36 border-2 border-dashed border-blue-400/80 rounded-xl flex items-center justify-center">
+                      <div className="absolute -top-1 -left-1 w-4 h-4 border-t-2 border-l-2 border-blue-400" />
+                      <div className="absolute -top-1 -right-1 w-4 h-4 border-t-2 border-r-2 border-blue-400" />
+                      <div className="absolute -bottom-1 -left-1 w-4 h-4 border-b-2 border-l-2 border-blue-400" />
+                      <div className="absolute -bottom-1 -right-1 w-4 h-4 border-b-2 border-r-2 border-blue-400" />
+                      <div className="absolute left-2 right-2 h-0.5 bg-gradient-to-r from-transparent via-red-500 to-transparent shadow-[0_0_8px_#ef4444] animate-bounce" />
+                    </div>
+                  </div>
+                )}
+
+                {!cameraActive && (
+                  <div className="absolute inset-0 flex flex-col items-center justify-center p-6 text-center text-white bg-slate-900/90">
+                    {cameraError ? (
+                      <>
+                        <AlertTriangle size={32} className="text-amber-400 mb-2" />
+                        <p className="text-sm font-bold text-amber-200">{cameraError}</p>
+                        <p className="text-xs text-slate-400 mt-1 max-w-sm">
+                          Switch to the <b>Upload Barcode Image</b> tab or use the test barcodes below.
+                        </p>
+                      </>
+                    ) : (
+                      <>
+                        <RefreshCw size={28} className="animate-spin text-brand mb-2" />
+                        <p className="text-sm font-bold">Connecting to camera...</p>
+                        <p className="text-xs text-slate-400 mt-1">Please allow camera permissions if prompted.</p>
+                      </>
+                    )}
+                  </div>
+                )}
+              </div>
+
+              {/* Phone Screen Scanning Tips */}
+              <div className="flex items-start gap-2 rounded-xl bg-blue-50/80 p-3 text-xs text-slate-600 border border-blue-100">
+                <Info size={16} className="text-brand shrink-0 mt-0.5" />
+                <div>
+                  <p className="font-bold text-brand">💡 Tips when scanning barcodes from a mobile phone screen:</p>
+                  <ul className="list-disc pl-4 mt-1 space-y-0.5 text-slate-600">
+                    <li>Hold your phone <b>15–25 cm (6–10 inches)</b> away from the laptop webcam so the camera can focus sharply.</li>
+                    <li>Avoid holding too close (laptop webcams have fixed focus and blur at close distances).</li>
+                    <li>Set your phone brightness to medium to prevent screen glare.</li>
+                  </ul>
+                </div>
+              </div>
             </div>
           )}
 
-          {/* Live Camera Viewport with Scanner Laser Animation */}
-          <div className="relative overflow-hidden rounded-2xl bg-slate-950 border-2 transition-all duration-300"
-            style={{
-              borderColor: flashSuccess ? '#10b981' : '#3b82f6',
-              boxShadow: flashSuccess ? '0 0 25px rgba(16,185,129,0.5)' : 'none',
-            }}
-          >
-            {/* Html5Qrcode video container */}
-            <div id="barcode-reader-viewport" className="w-full min-h-[260px] max-h-[340px]" />
+          {/* TAB 2: UPLOAD BARCODE IMAGE */}
+          {activeTab === 'upload' && (
+            <div className="space-y-4">
+              <input
+                type="file"
+                ref={fileInputRef}
+                accept="image/*"
+                onChange={handleFileChange}
+                className="hidden"
+              />
 
-            {/* Target Reticle & Laser overlay when camera is running */}
-            {cameraActive && (
-              <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
-                {/* Aiming Reticle */}
-                <div className="relative w-64 h-36 border-2 border-dashed border-blue-400/80 rounded-xl flex items-center justify-center">
-                  {/* Corner accents */}
-                  <div className="absolute -top-1 -left-1 w-4 h-4 border-t-2 border-l-2 border-blue-400" />
-                  <div className="absolute -top-1 -right-1 w-4 h-4 border-t-2 border-r-2 border-blue-400" />
-                  <div className="absolute -bottom-1 -left-1 w-4 h-4 border-b-2 border-l-2 border-blue-400" />
-                  <div className="absolute -bottom-1 -right-1 w-4 h-4 border-b-2 border-r-2 border-blue-400" />
-
-                  {/* Animated Scanning Laser Line */}
-                  <div className="absolute left-2 right-2 h-0.5 bg-gradient-to-r from-transparent via-red-500 to-transparent shadow-[0_0_8px_#ef4444] animate-bounce" />
-                </div>
-              </div>
-            )}
-
-            {/* Camera Loading / Error Banner */}
-            {!cameraActive && (
-              <div className="absolute inset-0 flex flex-col items-center justify-center p-6 text-center text-white bg-slate-900/90">
-                {cameraError ? (
-                  <>
-                    <AlertTriangle size={32} className="text-amber-400 mb-2" />
-                    <p className="text-sm font-bold text-amber-200">{cameraError}</p>
-                    <p className="text-xs text-slate-400 mt-1 max-w-sm">
-                      Check your browser camera permissions or try the test barcodes and manual entry below.
+              {/* Dropzone */}
+              <div
+                onDragOver={(e) => { e.preventDefault(); setIsDragging(true); }}
+                onDragLeave={() => setIsDragging(false)}
+                onDrop={handleDrop}
+                onClick={() => fileInputRef.current?.click()}
+                className={`flex flex-col items-center justify-center p-8 border-2 border-dashed rounded-2xl cursor-pointer transition-all ${
+                  isDragging
+                    ? 'border-brand bg-blue-50/70 scale-[0.99]'
+                    : 'border-slate-300 bg-slate-50/80 hover:bg-slate-100 hover:border-brand/70'
+                }`}
+              >
+                {uploadLoading ? (
+                  <div className="flex flex-col items-center py-4">
+                    <RefreshCw size={36} className="animate-spin text-brand mb-3" />
+                    <p className="font-bold text-sm text-slate-700">Analyzing image for barcodes…</p>
+                    <p className="text-xs text-slate-400 mt-1">Detecting EAN-13, CODE-128, UPC, and QR barcodes</p>
+                  </div>
+                ) : uploadedPreview ? (
+                  <div className="flex flex-col items-center">
+                    <img
+                      src={uploadedPreview}
+                      alt="Uploaded barcode"
+                      className="max-h-40 rounded-lg border border-slate-200 shadow-sm object-contain mb-3"
+                    />
+                    <p className="text-xs font-bold text-brand flex items-center gap-1.5">
+                      <ImageIcon size={14} /> Click to upload a different image
                     </p>
-                  </>
+                  </div>
                 ) : (
                   <>
-                    <RefreshCw size={28} className="animate-spin text-brand mb-2" />
-                    <p className="text-sm font-bold">Accessing camera...</p>
-                    <p className="text-xs text-slate-400 mt-1">Please allow camera permissions if prompted.</p>
+                    <div className="flex h-14 w-14 items-center justify-center rounded-2xl bg-blue-100 text-brand mb-3">
+                      <UploadCloud size={28} />
+                    </div>
+                    <p className="font-extrabold text-sm text-slate-800">
+                      Click to choose an image, or drag & drop here
+                    </p>
+                    <p className="text-xs text-slate-500 mt-1 text-center">
+                      Upload any photo, packaging picture, or screenshot of a barcode (PNG, JPG, WEBP)
+                    </p>
+                    <span className="mt-3 rounded-lg bg-white px-3.5 py-1.5 text-xs font-bold text-brand border border-slate-200 shadow-2xs">
+                      Browse Files
+                    </span>
                   </>
                 )}
               </div>
-            )}
-          </div>
 
-          {/* Scanned Result Banner */}
+              {uploadError && (
+                <div className="flex items-center gap-2 rounded-xl bg-red-50 p-3 text-xs font-semibold text-red-600 border border-red-200">
+                  <AlertTriangle size={15} className="shrink-0" />
+                  {uploadError}
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Scanned Result Card */}
           {lastScanned && (
             <div className={`flex items-center justify-between rounded-xl p-3.5 border transition-all animate-in slide-in-from-top-2 ${
               lastScanned.success
@@ -360,7 +593,7 @@ export default function BarcodeScannerModal({
             }`}>
               <div className="flex items-center gap-3">
                 <div className={`p-2 rounded-lg ${lastScanned.success ? 'bg-emerald-200 text-emerald-800' : 'bg-amber-200 text-amber-800'}`}>
-                  {lastScanned.success ? <CheckCircle size={20} /> : <AlertTriangle size={20} />}
+                  {lastScanned.success ? <CheckCircle2 size={20} /> : <AlertTriangle size={20} />}
                 </div>
                 <div>
                   {lastScanned.success ? (
@@ -372,7 +605,7 @@ export default function BarcodeScannerModal({
                         </span>
                       </div>
                       <p className="text-xs text-slate-600 mt-0.5">
-                        Price: ₹{lastScanned.product.price} · Barcode: {lastScanned.code} · Stock left: {lastScanned.product.stock}
+                        Price: ₹{lastScanned.product.price} · Barcode: {lastScanned.code} · In Stock: {lastScanned.product.stock}
                       </p>
                     </>
                   ) : (
@@ -387,7 +620,7 @@ export default function BarcodeScannerModal({
             </div>
           )}
 
-          {/* Quick Manual Code Input */}
+          {/* Manual Barcode Input */}
           <form onSubmit={handleManualSubmit} className="flex gap-2">
             <input
               type="text"
@@ -401,7 +634,7 @@ export default function BarcodeScannerModal({
             </button>
           </form>
 
-          {/* 3 Real Database Products with Scannable Barcodes */}
+          {/* 3 Real Database Products with Scannable Barcodes & Instant Tests */}
           <div className="border border-slate-200 rounded-xl bg-slate-50/70 p-4">
             <div className="flex items-center justify-between mb-3">
               <div className="flex items-center gap-1.5">
@@ -422,7 +655,7 @@ export default function BarcodeScannerModal({
             {showExamples && (
               <>
                 <p className="text-xs text-slate-500 mb-3">
-                  Point your laptop camera at any of the barcodes below (or click <b>"Simulate Scan"</b> to test immediately):
+                  Click <b>"Simulate Scan"</b> to test immediately, or download the barcode image and upload it in the Upload tab:
                 </p>
 
                 <div className="grid gap-3 sm:grid-cols-3">
@@ -460,7 +693,7 @@ export default function BarcodeScannerModal({
         <div className="flex items-center justify-between border-t border-slate-100 bg-slate-50 px-6 py-3.5">
           <p className="text-xs text-slate-500 flex items-center gap-1">
             <HelpCircle size={13} className="text-slate-400" />
-            Barcode scanning works with printed packaging, mobile screens, or sample cards.
+            Supports physical packaging, mobile screens, or uploaded barcode photos.
           </p>
           <button
             onClick={onClose}

@@ -1,7 +1,7 @@
 import { useState, useCallback, useEffect, useRef } from 'react';
 import {
   Phone, User, Search, ShoppingCart, Trash2,
-  ReceiptText, Tag, Plus, Minus, Star, CheckCircle, WifiOff, Camera,
+  ReceiptText, Tag, Plus, Minus, Star, CheckCircle, WifiOff, Camera, UploadCloud,
 } from 'lucide-react';
 import { useDB }   from '../context/DBContext.jsx';
 import { useSync } from '../context/SyncContext.jsx';
@@ -103,6 +103,7 @@ export default function Billing() {
   const [invoice, setInvoice]         = useState(null);
   const [saving, setSaving]           = useState(false);
   const [scannerOpen, setScannerOpen] = useState(false);
+  const [scannerTab, setScannerTab]   = useState('camera');
 
   // ── Debounced phone lookup ────────────────────────────────────────────────
   useEffect(() => {
@@ -294,13 +295,22 @@ export default function Billing() {
                 <span className="mr-2 inline-flex h-6 w-6 items-center justify-center rounded-full bg-brand text-xs text-white font-extrabold">2</span>
                 Products
               </h2>
-              <button
-                type="button"
-                onClick={() => setScannerOpen(true)}
-                className="btn-primary text-xs px-3.5 py-1.5 flex items-center gap-1.5 shadow-xs"
-              >
-                <Camera size={14} /> Scan Barcode (Camera)
-              </button>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => { setScannerTab('camera'); setScannerOpen(true); }}
+                  className="btn-primary text-xs px-3 py-1.5 flex items-center gap-1.5 shadow-xs"
+                >
+                  <Camera size={14} /> Scan (Camera)
+                </button>
+                <button
+                  type="button"
+                  onClick={() => { setScannerTab('upload'); setScannerOpen(true); }}
+                  className="rounded-xl border border-slate-200 bg-white px-3 py-1.5 text-xs font-bold text-slate-700 hover:border-brand hover:text-brand transition flex items-center gap-1.5 shadow-2xs"
+                >
+                  <UploadCloud size={14} className="text-brand" /> Upload Image
+                </button>
+              </div>
             </div>
             <div className="relative mb-3 flex gap-2">
               <div className="relative flex-1">
@@ -446,6 +456,7 @@ export default function Billing() {
       {scannerOpen && (
         <BarcodeScannerModal
           isOpen={scannerOpen}
+          initialTab={scannerTab}
           onClose={() => setScannerOpen(false)}
           products={products}
           onProductScanned={(product) => addToCart(product)}
