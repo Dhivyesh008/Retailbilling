@@ -19,7 +19,7 @@ import Products from './pages/Products.jsx';
 /** Any unauthenticated visitor → Login */
 function ProtectedRoute() {
   const { currentUser } = useAuth();
-  return currentUser ? <Outlet /> : <Navigate to="/" replace />;
+  return currentUser ? <Outlet /> : <Navigate to="/login" replace />;
 }
 
 /**
@@ -37,6 +37,13 @@ function ManagerRoute() {
   return canManage ? <Outlet /> : <Navigate to="/dashboard" replace />;
 }
 
+function RootRedirect() {
+  const { currentUser, isCashier } = useAuth();
+
+  if (!currentUser) return <Navigate to="/login" replace />;
+  return <Navigate to={isCashier ? '/billing' : '/dashboard'} replace />;
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 
 export default function App() {
@@ -46,21 +53,24 @@ export default function App() {
         <DBProvider>
           <BrowserRouter>
             <Routes>
-              {/* Main Layout containing Products as the primary startup page */}
-              <Route element={<Layout />}>
-                <Route index element={<Products />} />
-                <Route path="products" element={<Products />} />
-                <Route path="dashboard" element={<Dashboard />} />
-                <Route path="billing" element={<Billing />} />
-                <Route path="inventory" element={<Inventory />} />
-                <Route path="customers" element={<Customers />} />
-                <Route path="returns" element={<Returns />} />
-                <Route path="reports" element={<Reports />} />
-                <Route path="sync-queue" element={<SyncQueue />} />
-                <Route path="promotions" element={<PromotionsLoyalty />} />
+              <Route path="/" element={<RootRedirect />} />
+              <Route path="/login" element={<Login />} />
+
+              <Route element={<ProtectedRoute />}>
+                <Route element={<Layout />}>
+                  <Route path="products" element={<Products />} />
+                  <Route path="dashboard" element={<Dashboard />} />
+                  <Route path="billing" element={<Billing />} />
+                  <Route path="inventory" element={<Inventory />} />
+                  <Route path="customers" element={<Customers />} />
+                  <Route path="returns" element={<Returns />} />
+                  <Route path="reports" element={<Reports />} />
+                  <Route path="sync-queue" element={<SyncQueue />} />
+                  <Route path="promotions" element={<PromotionsLoyalty />} />
+                </Route>
               </Route>
-              <Route path="login" element={<Login />} />
-              <Route path="*" element={<Navigate to="/" replace />} />
+
+              <Route path="*" element={<Navigate to="/login" replace />} />
             </Routes>
           </BrowserRouter>
         </DBProvider>
