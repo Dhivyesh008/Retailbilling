@@ -124,14 +124,27 @@ export default function InvoiceModal({ invoice, onClose }) {
                 </tr>
               </thead>
               <tbody>
-                {cart.map(({ product, qty }) => (
-                  <tr key={product.id}>
-                    <td className="py-0.5 pr-2 max-w-[120px] truncate">{product.name}</td>
-                    <td className="right py-0.5">{qty}</td>
-                    <td className="right py-0.5">{product.price}</td>
-                    <td className="right py-0.5 font-bold">₹{product.price * qty}</td>
-                  </tr>
-                ))}
+                {cart.map((item) => {
+                  const p = item.product || item;
+                  const original = item.originalPrice ?? p.price;
+                  const effective = item.effectivePrice ?? (item.hasOffer ? item.discountedPrice : (item.price ?? p.price));
+                  const hasOff = Boolean(item.hasOffer || (effective < original));
+                  const lineTot = item.lineTotal ?? (effective * item.qty);
+                  return (
+                    <tr key={p.id}>
+                      <td className="py-0.5 pr-2 max-w-[120px] truncate">{p.name}</td>
+                      <td className="right py-0.5">{item.qty}</td>
+                      <td className="right py-0.5">
+                        {hasOff ? (
+                          <span><span style={{ textDecoration: 'line-through', opacity: 0.6 }}>₹{original}</span> <b>₹{effective}</b></span>
+                        ) : (
+                          `₹${original}`
+                        )}
+                      </td>
+                      <td className="right py-0.5 font-bold">₹{lineTot}</td>
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
 

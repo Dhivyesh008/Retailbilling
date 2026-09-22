@@ -21,6 +21,8 @@
  */
 
 import { supabase } from '../lib/supabase.js';
+import { billsDB } from '../db/db.js';
+import { parseTimestamp } from '../lib/dateUtils.js';
 
 // ─── helpers ─────────────────────────────────────────────────────────────────
 
@@ -154,19 +156,62 @@ function mapCustomer(row) {
  * so the rest of the UI works without changes.
  */
 export async function fetchSales() {
-  const { data: salesRows, error: salesErr } = await supabase
-    .from('sales')
-    .select(`
-      *,
-      sale_items (
-        id, product_id, quantity, unit_price, discount,
-        products ( name, sku, category )
-      )
-    `)
-    .order('created_at', { ascending: false });
+  let serverSales = [];
+  try {
+    const { data: salesRows, error: salesErr } = await supabase
+      .from('sales')
+      .select(`
+        *,
+        sale_items (
+          id, product_id, quantity, unit_price, discount,
+          products ( name, sku, category )
+        )
+      `)
+      .order('created_at', { ascending: false });
 
-  if (salesErr) throw salesErr;
-  return (salesRows ?? []).map(mapSale);
+    if (salesErr) {
+      console.warn('[Supabase] fetchSales error, falling back to local cache:', salesErr.message);
+    } else {
+      serverSales = (salesRows ?? []).map(mapSale);
+    }
+  } catch (err) {
+    console.warn('[Supabase] fetchSales network error, using local cache:', err);
+  }
+
+  // Also read from local IndexedDB (which contains offline & PENDING_SYNC bills)
+  let localBills = [];
+  try {
+    localBills = await billsDB.getAll();
+  } catch (err) {
+    console.warn('[fetchSales] Error reading local bills:', err);
+  }
+
+  // Deduplicate and merge by invoiceNumber or id
+  const map = new Map();
+  // 1. Add server sales
+  for (const s of serverSales) {
+    const key = s.invoiceNumber || s.id;
+    if (key) map.set(key, s);
+  }
+  // 2. Overlay local bills (preserves PENDING_SYNC or newly created sales not yet in server list)
+  for (const b of localBills) {
+    const key = b.invoiceNumber || b.id;
+    if (key) {
+      const existing = map.get(key);
+      if (!existing) {
+        map.set(key, b);
+      } else if (b.status === 'PENDING_SYNC' || b.syncStatus === 'pending') {
+        map.set(key, { ...existing, ...b });
+      }
+    } else {
+      map.set(`local-${Math.random()}`, b);
+    }
+  }
+
+  const merged = Array.from(map.values());
+  // Sort descending by timestamp in local time
+  merged.sort((a, b) => parseTimestamp(b.timestamp).getTime() - parseTimestamp(a.timestamp).getTime());
+  return merged;
 }
 
 /**
@@ -312,65 +357,19 @@ export async function fetchPromotions() {
   return (data ?? []).map(mapPromotion);
 }
 
-export async function insertPromotion({ name, discountType, value, productId = null, startDate = null, endDate = null, active = true }) {
-  const { data, error } = await supabase
-    .from('promotions')
-    .insert({
-      name: (name || '').trim(),
-      discount_type: discountType || 'percent',
-      discount_value: parseFloat(value) || 0,
-      product_id: productId ? Number(productId) : null,
-      start_date: startDate || null,
-      end_date: endDate || null,
-      active: active ?? true,
-    })
-    .select()
-    .single();
-  if (error) throw error;
-  return mapPromotion(data);
-}
-
-export async function updatePromotion(id, updates) {
-  const payload = {};
-  if (updates.name !== undefined) payload.name = updates.name.trim();
-  if (updates.discountType !== undefined) payload.discount_type = updates.discountType;
-  if (updates.value !== undefined) payload.discount_value = parseFloat(updates.value);
-  if (updates.productId !== undefined) payload.product_id = updates.productId ? Number(updates.productId) : null;
-  if (updates.startDate !== undefined) payload.start_date = updates.startDate || null;
-  if (updates.endDate !== undefined) payload.end_date = updates.endDate || null;
-  if (updates.active !== undefined) payload.active = updates.active;
-
-  const { data, error } = await supabase
-    .from('promotions')
-    .update(payload)
-    .eq('id', id)
-    .select()
-    .single();
-  if (error) throw error;
-  return mapPromotion(data);
-}
-
-export async function deletePromotion(id) {
-  const { error } = await supabase
-    .from('promotions')
-    .delete()
-    .eq('id', id);
-  if (error) throw error;
-  return true;
-}
-
 function mapPromotion(row) {
   return {
     id:            row.id,
     name:          row.name ?? '',
     discountType:  row.discount_type ?? 'percent',   // 'percent' | 'flat'
     value:         parseFloat(row.discount_value ?? 0),
-    productId:     row.product_id ? Number(row.product_id) : null,
+    productId:     row.product_id ?? null,
     startDate:     row.start_date ?? null,
     endDate:       row.end_date   ?? null,
     active:        row.active ?? false,
+    // legacy aliases used by Billing.jsx
     minCartValue:  0,
-    scope:         row.product_id ? 'product' : 'all',
+    scope:         'all',
   };
 }
 

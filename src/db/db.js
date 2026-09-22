@@ -1,228 +1,150 @@
-import { openDB } from 'idb';
+import Dexie from 'dexie';
+import { isToday } from '../lib/dateUtils.js';
 
-const DB_NAME = 'retailsync-db';
-const DB_VERSION = 3;
+export const db = new Dexie('retailsync-db');
 
-let dbPromise = null;
+// Version 7: Full Dexie-native schema matching existing tables and indexes
+db.version(7).stores({
+  products:             'id, category, sku',
+  stock:                'productId',
+  customers:            'id, phone, email',
+  promotions:           'id, active',
+  users:                'id, role',
+  bills:                'id, customerId, cashierId, timestamp, status',
+  returns:              'id, billId, status',
+  syncQueue:            'id, status, entityType',
+  stores:               'id',
+  loyaltyTiers:         'id, minVisits',
+  pricingRules:         'id, type, active, branchScope',
+  priceRecommendations: 'id, status, ruleId',
+});
 
-export function getDB() {
-  if (!dbPromise) {
-    dbPromise = openDB(DB_NAME, DB_VERSION, {
-      upgrade(db) {
-        // products
-        if (!db.objectStoreNames.contains('products')) {
-          const ps = db.createObjectStore('products', { keyPath: 'id' });
-          ps.createIndex('by-category', 'category');
-          ps.createIndex('by-sku', 'sku', { unique: true });
-        }
-        // stock
-        if (!db.objectStoreNames.contains('stock')) {
-          const ss = db.createObjectStore('stock', { keyPath: 'productId' });
-          ss.createIndex('by-productId', 'productId');
-        }
-        // customers
-        if (!db.objectStoreNames.contains('customers')) {
-          const cs = db.createObjectStore('customers', { keyPath: 'id' });
-          cs.createIndex('by-phone', 'phone');
-          cs.createIndex('by-email', 'email');
-        }
-        // promotions
-        if (!db.objectStoreNames.contains('promotions')) {
-          db.createObjectStore('promotions', { keyPath: 'id' });
-        }
-        // users
-        if (!db.objectStoreNames.contains('users')) {
-          const us = db.createObjectStore('users', { keyPath: 'id' });
-          us.createIndex('by-role', 'role');
-        }
-        // bills
-        if (!db.objectStoreNames.contains('bills')) {
-          const bs = db.createObjectStore('bills', { keyPath: 'id' });
-          bs.createIndex('by-customerId', 'customerId');
-          bs.createIndex('by-cashierId', 'cashierId');
-          bs.createIndex('by-timestamp', 'timestamp');
-          bs.createIndex('by-status', 'status');
-        }
-        // returns
-        if (!db.objectStoreNames.contains('returns')) {
-          const rs = db.createObjectStore('returns', { keyPath: 'id' });
-          rs.createIndex('by-billId', 'billId');
-          rs.createIndex('by-status', 'status');
-        }
-        // syncQueue
-        if (!db.objectStoreNames.contains('syncQueue')) {
-          const sq = db.createObjectStore('syncQueue', { keyPath: 'id' });
-          sq.createIndex('by-status', 'status');
-          sq.createIndex('by-entityType', 'entityType');
-        }
-        // stores (branches)
-        if (!db.objectStoreNames.contains('stores')) {
-          db.createObjectStore('stores', { keyPath: 'id' });
-        }
-        // loyaltyTiers
-        if (!db.objectStoreNames.contains('loyaltyTiers')) {
-          const lt = db.createObjectStore('loyaltyTiers', { keyPath: 'id' });
-          lt.createIndex('by-minVisits', 'minVisits');
-        }
-      },
-    });
-  }
-  return dbPromise;
-}
-
-// ─── Generic helpers ─────────────────────────────────────────────────────────
-
-async function getAll(store) {
-  const db = await getDB();
-  return db.getAll(store);
-}
-
-async function getById(store, id) {
-  const db = await getDB();
-  return db.get(store, id);
-}
-
-async function put(store, item) {
-  const db = await getDB();
-  return db.put(store, item);
-}
-
-async function del(store, id) {
-  const db = await getDB();
-  return db.delete(store, id);
-}
-
-async function getAllByIndex(store, index, value) {
-  const db = await getDB();
-  return db.getAllFromIndex(store, index, value);
+// Backward-compatible getDB helper
+export async function getDB() {
+  await db.open();
+  return db;
 }
 
 // ─── Products ────────────────────────────────────────────────────────────────
 export const productsDB = {
-  getAll: () => getAll('products'),
-  getById: (id) => getById('products', id),
-  put: (product) => put('products', product),
-  delete: (id) => del('products', id),
-  getByCategory: (cat) => getAllByIndex('products', 'by-category', cat),
+  getAll:        () => db.products.toArray(),
+  getById:       (id) => db.products.get(id),
+  put:           (product) => db.products.put(product),
+  delete:        (id) => db.products.delete(id),
+  getByCategory: (cat) => db.products.where('category').equals(cat).toArray(),
 };
 
 // ─── Stock ───────────────────────────────────────────────────────────────────
 export const stockDB = {
-  getAll: () => getAll('stock'),
-  getByProductId: (productId) => getById('stock', productId),
-  put: (stockItem) => put('stock', stockItem),
+  getAll:         () => db.stock.toArray(),
+  getByProductId: (productId) => db.stock.get(productId),
+  put:            (stockItem) => db.stock.put(stockItem),
   adjustStock: async (productId, delta) => {
-    const db = await getDB();
-    const tx = db.transaction('stock', 'readwrite');
-    const existing = await tx.store.get(productId);
-    if (existing) {
-      existing.quantity = Math.max(0, existing.quantity + delta);
-      existing.lastUpdated = new Date().toISOString();
-      await tx.store.put(existing);
-    }
-    await tx.done;
+    return db.transaction('rw', db.stock, async () => {
+      const existing = await db.stock.get(productId);
+      if (existing) {
+        existing.quantity = Math.max(0, (existing.quantity || 0) + delta);
+        existing.lastUpdated = new Date().toISOString();
+        await db.stock.put(existing);
+      }
+    });
   },
 };
 
 // ─── Customers ───────────────────────────────────────────────────────────────
 export const customersDB = {
-  getAll: () => getAll('customers'),
-  getById: (id) => getById('customers', id),
-  put: (customer) => put('customers', customer),
-  delete: (id) => del('customers', id),
+  getAll:  () => db.customers.toArray(),
+  getById: (id) => db.customers.get(id),
+  put:     (customer) => db.customers.put(customer),
+  delete:  (id) => db.customers.delete(id),
 
   /** Look up a customer by phone number. Returns null if not found. */
   getByPhone: async (phone) => {
-    const db = await getDB();
-    const results = await db.getAllFromIndex('customers', 'by-phone', phone);
+    const results = await db.customers.where('phone').equals(phone).toArray();
     return results[0] ?? null;
   },
 
   /** Add a bill ID to purchase history AND increment loyaltyPoints atomically. */
   recordSale: async (customerId, billId, pointsEarned) => {
-    const db = await getDB();
-    const tx = db.transaction('customers', 'readwrite');
-    const cust = await tx.store.get(customerId);
-    if (cust) {
-      cust.purchaseHistory = [...(cust.purchaseHistory || []), billId];
-      cust.loyaltyPoints = (cust.loyaltyPoints ?? 0) + pointsEarned;
-      await tx.store.put(cust);
-    }
-    await tx.done;
-    return cust;
+    return db.transaction('rw', db.customers, async () => {
+      const cust = await db.customers.get(customerId);
+      if (cust) {
+        cust.purchaseHistory = [...(cust.purchaseHistory || []), billId];
+        cust.loyaltyPoints = (cust.loyaltyPoints ?? 0) + pointsEarned;
+        await db.customers.put(cust);
+      }
+      return cust;
+    });
   },
 
   /** Legacy helper kept for backwards compat (Returns page uses it). */
   addPurchaseHistory: async (customerId, billId) => {
-    const db = await getDB();
-    const tx = db.transaction('customers', 'readwrite');
-    const cust = await tx.store.get(customerId);
-    if (cust) {
-      cust.purchaseHistory = [...(cust.purchaseHistory || []), billId];
-      await tx.store.put(cust);
-    }
-    await tx.done;
+    return db.transaction('rw', db.customers, async () => {
+      const cust = await db.customers.get(customerId);
+      if (cust) {
+        cust.purchaseHistory = [...(cust.purchaseHistory || []), billId];
+        await db.customers.put(cust);
+      }
+    });
   },
 };
 
 // ─── Promotions ──────────────────────────────────────────────────────────────
 export const promotionsDB = {
-  getAll: () => getAll('promotions'),
-  getById: (id) => getById('promotions', id),
+  getAll:    () => db.promotions.toArray(),
+  getById:   (id) => db.promotions.get(id),
   getActive: async () => {
-    const all = await getAll('promotions');
+    const all = await db.promotions.toArray();
     return all.filter((p) => p.active);
   },
-  put: (promo) => put('promotions', promo),
-  delete: (id) => del('promotions', id),
+  put:       (promo) => db.promotions.put(promo),
+  delete:    (id) => db.promotions.delete(id),
 };
 
 // ─── Users ───────────────────────────────────────────────────────────────────
 export const usersDB = {
-  getAll: () => getAll('users'),
-  getById: (id) => getById('users', id),
-  getByRole: (role) => getAllByIndex('users', 'by-role', role),
+  getAll:      () => db.users.toArray(),
+  getById:     (id) => db.users.get(id),
+  getByRole:   (role) => db.users.where('role').equals(role).toArray(),
   validatePin: async (role, pin) => {
-    const db = await getDB();
-    const all = await db.getAll('users');
+    const all = await db.users.toArray();
     return all.find((u) => u.role === role && u.pin === pin) || null;
   },
-  put: (user) => put('users', user),
+  put:         (user) => db.users.put(user),
 };
 
 // ─── Bills ───────────────────────────────────────────────────────────────────
 export const billsDB = {
-  getAll: () => getAll('bills'),
-  getById: (id) => getById('bills', id),
-  put: (bill) => put('bills', bill),
-  getByCustomer: (customerId) => getAllByIndex('bills', 'by-customerId', customerId),
+  getAll:         () => db.bills.toArray(),
+  getById:        (id) => db.bills.get(id),
+  put:            (bill) => db.bills.put(bill),
+  delete:         (id) => db.bills.delete(id),
+  getByCustomer:  (customerId) => db.bills.where('customerId').equals(customerId).toArray(),
   getPending: async () => {
-    const all = await getAll('bills');
+    const all = await db.bills.toArray();
     return all.filter((b) => b.status === 'PENDING_SYNC');
   },
   getTodaysBills: async () => {
-    const all = await getAll('bills');
-    const todayStart = new Date();
-    todayStart.setHours(0, 0, 0, 0);
-    return all.filter((b) => new Date(b.timestamp) >= todayStart);
+    const all = await db.bills.toArray();
+    return all.filter((b) => isToday(b.timestamp) && b.status !== 'cancelled');
   },
 };
 
 // ─── Returns ─────────────────────────────────────────────────────────────────
 export const returnsDB = {
-  getAll: () => getAll('returns'),
-  getById: (id) => getById('returns', id),
-  put: (ret) => put('returns', ret),
-  getByBill: (billId) => getAllByIndex('returns', 'by-billId', billId),
+  getAll:    () => db.returns.toArray(),
+  getById:   (id) => db.returns.get(id),
+  put:       (ret) => db.returns.put(ret),
+  getByBill: (billId) => db.returns.where('billId').equals(billId).toArray(),
 };
 
 // ─── Sync Queue ───────────────────────────────────────────────────────────────
 export const syncQueueDB = {
-  getAll: () => getAll('syncQueue'),
-  getById: (id) => getById('syncQueue', id),
-  put: (item) => put('syncQueue', item),
+  getAll:     () => db.syncQueue.toArray(),
+  getById:    (id) => db.syncQueue.get(id),
+  put:        (item) => db.syncQueue.put(item),
   getPending: async () => {
-    const all = await getAll('syncQueue');
+    const all = await db.syncQueue.toArray();
     return all.filter((q) => q.status === 'PENDING_SYNC');
   },
   enqueue: async (entityType, entityId, action) => {
@@ -234,52 +156,84 @@ export const syncQueueDB = {
       timestamp: new Date().toISOString(),
       status: 'PENDING_SYNC',
     };
-    await put('syncQueue', item);
+    await db.syncQueue.put(item);
     return item;
   },
   markSynced: async (id) => {
-    const db = await getDB();
-    const tx = db.transaction('syncQueue', 'readwrite');
-    const item = await tx.store.get(id);
+    const item = await db.syncQueue.get(id);
     if (item) {
       item.status = 'SYNCED';
-      await tx.store.put(item);
+      await db.syncQueue.put(item);
     }
-    await tx.done;
   },
 };
 
 // ─── Stores (Branches) ────────────────────────────────────────────────────────
 export const storesDB = {
-  getAll: () => getAll('stores'),
-  getById: (id) => getById('stores', id),
-  put: (store) => put('stores', store),
+  getAll: () => db.stores.toArray(),
+  getById: (id) => db.stores.get(id),
+  put: (store) => db.stores.put(store),
   /** Returns the store record if password matches, else null. */
   validatePassword: async (storeId, password) => {
-    const store = await getById('stores', storeId);
+    const store = await db.stores.get(storeId);
     if (!store) return null;
     return store.password === password ? store : null;
   },
 };
 
 // ─── Users (extended) ─────────────────────────────────────────────────────────
-// New helper: look up user by userId string (e.g. "cashier1")
 export async function getUserByUserId(userId) {
-  const db = await getDB();
-  const all = await db.getAll('users');
+  const all = await db.users.toArray();
   return all.find((u) => u.userId === userId) ?? null;
 }
 
 // ─── Loyalty Tiers ────────────────────────────────────────────────────────────
 export const loyaltyTiersDB = {
-  getAll: () => getAll('loyaltyTiers'),
-  getById: (id) => getById('loyaltyTiers', id),
-  put: (tier) => put('loyaltyTiers', tier),
-  delete: (id) => del('loyaltyTiers', id),
+  getAll: () => db.loyaltyTiers.toArray(),
+  getById: (id) => db.loyaltyTiers.get(id),
+  put: (tier) => db.loyaltyTiers.put(tier),
+  delete: (id) => db.loyaltyTiers.delete(id),
   getActive: async () => {
-    const all = await getAll('loyaltyTiers');
+    const all = await db.loyaltyTiers.toArray();
     return all
       .filter((t) => t.active)
       .sort((a, b) => b.minVisits - a.minVisits); // descending — first match wins
+  },
+};
+
+// ─── Pricing Rules ────────────────────────────────────────────────────────────
+export const pricingRulesDB = {
+  getAll:    () => db.pricingRules.toArray(),
+  getById:   (id) => db.pricingRules.get(id),
+  put:       (rule) => db.pricingRules.put(rule),
+  delete:    (id) => db.pricingRules.delete(id),
+  getActive: async () => {
+    const all = await db.pricingRules.toArray();
+    return all.filter((r) => r.active);
+  },
+};
+
+// ─── Price Recommendations ────────────────────────────────────────────────────
+export const priceRecommendationsDB = {
+  getAll:    () => db.priceRecommendations.toArray(),
+  getById:   (id) => db.priceRecommendations.get(id),
+  put:       (rec) => db.priceRecommendations.put(rec),
+  delete:    (id) => db.priceRecommendations.delete(id),
+  getPending: async () => {
+    const all = await db.priceRecommendations.toArray();
+    return all.filter((r) => r.status === 'PENDING_APPROVAL');
+  },
+  getByStatus: async (status) => {
+    const all = await db.priceRecommendations.toArray();
+    return all.filter((r) => r.status === status);
+  },
+  getByRule: async (ruleId) => {
+    const all = await db.priceRecommendations.toArray();
+    return all.filter((r) => r.ruleId === ruleId);
+  },
+  /** Returns all non-rejected recommendations (PENDING + APPROVED) */
+  getActive: async () => {
+    const all = await db.priceRecommendations.toArray();
+    return all.filter((r) => r.status !== 'REJECTED');
   },
 };

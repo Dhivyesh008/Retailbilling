@@ -1,7 +1,7 @@
 import { NavLink, useNavigate } from 'react-router-dom';
 import {
   LayoutDashboard, Receipt, Boxes, Users, RotateCcw,
-  BarChart3, LogOut, Store, ChevronRight, RefreshCw, Building2, Tag, Package,
+  BarChart3, LogOut, Store, ChevronRight, RefreshCw, Building2, Tag, Package, Sparkles,
 } from 'lucide-react';
 import { useAuth } from '../context/AuthContext.jsx';
 
@@ -13,8 +13,9 @@ const ALL_LINKS = [
   { to: '/customers',   label: 'Customers',           Icon: Users,           roles: ['Admin','Manager'] },
   { to: '/returns',     label: 'Returns',             Icon: RotateCcw,       roles: ['Admin','Manager'] },
   { to: '/reports',     label: 'Reports',             Icon: BarChart3,       roles: ['Admin','Manager'] },
-  { to: '/promotions',  label: 'Promotions & Loyalty',Icon: Tag,             roles: ['Admin','Manager'] },
-  { to: '/sync-queue',  label: 'Sync Queue',          Icon: RefreshCw,       roles: ['Admin','Manager'] },
+  { to: '/promotions',     label: 'Promotions & Loyalty', Icon: Tag,      roles: ['Admin','Manager'] },
+  { to: '/pricing-rules',  label: 'Pricing Engine',       Icon: Sparkles, roles: ['Admin','Manager'] },
+  { to: '/sync-queue',     label: 'Sync Queue',           Icon: RefreshCw,roles: ['Admin','Manager'] },
 ];
 
 export default function Sidebar() {

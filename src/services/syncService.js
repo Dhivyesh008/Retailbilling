@@ -1,8 +1,7 @@
 import { syncQueueDB, customersDB, billsDB } from '../db/db.js';
 import { supabase } from '../lib/supabase.js';
 import { mapCustomer, syncOfflineCustomers } from './customerService.js';
-import { syncOfflineBills } from './billingService.js';
-import { syncOfflinePromotions } from './promotionService.js';
+import { insertSale, adjustProductStock, incrementLoyaltyPoints } from './supabaseService.js';
 
 /**
  * Pushes a single sync queue entry to the Supabase database.
@@ -47,6 +46,64 @@ async function pushToServer(entry) {
     return;
   }
 
+  if (entry.entityType === 'bill') {
+    const bill = await billsDB.getById(entry.entityId);
+    if (!bill) {
+      console.warn('[SyncService] Bill not found locally for sync queue entry:', entry.entityId);
+      return;
+    }
+
+    const toNumericId = (v) => {
+      const n = parseInt(v, 10);
+      return isNaN(n) ? null : n;
+    };
+
+    // Insert sale into Supabase
+    const saleId = await insertSale({
+      invoiceNumber: bill.invoiceNumber,
+      customerId:    bill.customerId,
+      cashierId:     toNumericId(bill.cashierId),
+      storeId:       toNumericId(bill.storeId),
+      subtotal:      bill.subtotal,
+      discount:      bill.discount,
+      tax:           bill.tax ?? 0,
+      total:         bill.total,
+      paymentMethod: bill.payment,
+      status:        'completed',
+      syncStatus:    'synced',
+      items: (bill.items || []).map((item) => ({
+        productId: item.productId,
+        name:      item.name,
+        price:     item.price,
+        qty:       item.qty,
+        category:  item.category,
+      })),
+    });
+
+    // Reduce stock in Supabase for each item
+    if (bill.items && bill.items.length > 0) {
+      await Promise.allSettled(
+        bill.items.map((i) => adjustProductStock(i.productId, -i.qty))
+      );
+    }
+
+    // Increment loyalty points in Supabase
+    if (bill.customerId) {
+      await incrementLoyaltyPoints(bill.customerId, 1).catch(() => {});
+    }
+
+    // Update local bill record
+    bill.status = 'SYNCED';
+    bill.syncStatus = 'synced';
+    if (saleId && String(saleId) !== bill.id) {
+      await billsDB.delete(bill.id);
+      bill.id = String(saleId);
+    }
+    await billsDB.put(bill);
+    console.log('[SyncService] Synced bill to Supabase:', bill.invoiceNumber);
+    return;
+  }
+
   // Fallback simulated delay for other entity types if any
   await new Promise((resolve) => setTimeout(resolve, 200));
 }
@@ -56,20 +113,14 @@ async function pushToServer(entry) {
 /**
  * Iterates all PENDING_SYNC entries in the syncQueue store,
  * calls pushToServer() for each, then marks them SYNCED.
- * Also runs syncOfflineCustomers() and syncOfflineBills() to flush all pending local data.
+ * Also runs syncOfflineCustomers() to ensure all pending local data is flushed.
  *
  * @param {Function} [onProgress] - Optional callback(processed, total)
  * @returns {Promise<{processed: number, failed: number}>}
  */
 export async function runSyncQueue(onProgress) {
-  // 1. Sync pending offline customers first (so bills can link to synced customer IDs)
+  // First run customer sync directly to cover any unqueued pending customers
   await syncOfflineCustomers();
-
-  // 2. Sync pending offline bills/sales to Supabase
-  await syncOfflineBills();
-
-  // 3. Sync pending offline promotions to Supabase
-  await syncOfflinePromotions();
 
   const pending = await syncQueueDB.getPending();
   let processed = 0;

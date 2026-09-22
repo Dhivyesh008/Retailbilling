@@ -1,709 +1,709 @@
-/**
- * BarcodeScannerModal.jsx
- *
- * Full-featured Barcode Scanner for Point-of-Sale Billing:
- * 1. Live Laptop / Webcam Camera Scanning (with native BarcodeDetector acceleration, reticle, and laser guide).
- * 2. Barcode Image Upload (Drag-and-drop or select an image / screenshot of a barcode).
- * 3. Audio & Visual POS feedback (authentic beep and green border pulse).
- * 4. 3 Sample Database Products (Milk, Bread, Rice 5kg) with live scannable SVG barcodes, instant scan simulation, and one-click image download for testing.
- * 5. Automatic matching with Supabase PostgreSQL products database.
- */
-
-import { useState, useEffect, useRef } from 'react';
-import { Html5Qrcode, Html5QrcodeSupportedFormats } from 'html5-qrcode';
-import JsBarcode from 'jsbarcode';
+import { useEffect, useRef, useState, useCallback } from 'react';
+import { HTMLCanvasElementLuminanceSource } from '@zxing/browser';
 import {
-  Camera, UploadCloud, X, Volume2, VolumeX, CheckCircle2, AlertTriangle,
-  Sparkles, ShoppingCart, HelpCircle, Image as ImageIcon, Download,
-  RefreshCw, Info, Check, FileCheck
-} from 'lucide-react';
+  MultiFormatReader,
+  BinaryBitmap,
+  HybridBinarizer,
+  DecodeHintType,
+  BarcodeFormat,
+} from '@zxing/library';
+import { X, Camera, AlertCircle, ScanLine, RefreshCw, Upload, SwitchCamera } from 'lucide-react';
 
-/** Web Audio API Beep Generator */
-function playPosBeep() {
+/**
+ * Multi-pass barcode decoder:
+ *   Pass 1: Direct full frame decode
+ *   Pass 2: Center rectangular region crop (matching horizontal scan guide box)
+ *   Pass 3: Quiet zone padding for dark-background or tight-crop barcodes
+ *   Pass 4: Inverted luminance (for white-on-dark barcodes)
+ */
+function decodeCanvas(canvas, ctx, reader) {
+  // Pass 1: Direct full frame decode
   try {
-    const AudioContextClass = window.AudioContext || window.webkitAudioContext;
-    if (!AudioContextClass) return;
-    const ctx = new AudioContextClass();
-    const osc = ctx.createOscillator();
-    const gain = ctx.createGain();
-
-    osc.type = 'sine';
-    osc.frequency.setValueAtTime(950, ctx.currentTime);
-    gain.gain.setValueAtTime(0.25, ctx.currentTime);
-    gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.12);
-
-    osc.connect(gain);
-    gain.connect(ctx.destination);
-    osc.start();
-    osc.stop(ctx.currentTime + 0.12);
+    const lum = new HTMLCanvasElementLuminanceSource(canvas);
+    const bitmap = new BinaryBitmap(new HybridBinarizer(lum));
+    const res = reader.decodeWithState(bitmap);
+    if (res && res.getText()) return res.getText();
   } catch {
-    // AudioContext blocked before user interaction
+    // Pass 1 NotFoundException
   }
-}
 
-/** Component to render real SVG barcodes using JsBarcode */
-function ProductBarcodeSvg({ barcode, label, onDownload }) {
-  const svgRef = useRef(null);
+  const w = canvas.width;
+  const h = canvas.height;
 
-  useEffect(() => {
-    if (!svgRef.current || !barcode) return;
-    try {
-      JsBarcode(svgRef.current, String(barcode), {
-        format: String(barcode).length === 13 ? 'EAN13' : 'CODE128',
-        width: 1.4,
-        height: 38,
-        displayValue: true,
-        fontSize: 11,
-        margin: 4,
-        background: '#ffffff',
-        lineColor: '#0f172a',
-      });
-    } catch {
-      try {
-        JsBarcode(svgRef.current, String(barcode), {
-          format: 'CODE128',
-          width: 1.4,
-          height: 38,
-          displayValue: true,
-          fontSize: 11,
-          margin: 4,
-          background: '#ffffff',
-          lineColor: '#0f172a',
-        });
-      } catch (e) {
-        console.warn('Barcode render error:', e);
+  // Pass 2: Center rectangular horizontal window crop
+  // Focuses specifically on the horizontal scan zone where the user is holding the barcode
+  try {
+    const boxW = Math.round(w * 0.80);
+    const boxH = Math.round(h * 0.38);
+    const startX = Math.round((w - boxW) / 2);
+    const startY = Math.round((h - boxH) / 2);
+
+    const pad = 24;
+    const padCanvas = document.createElement('canvas');
+    padCanvas.width = boxW + pad * 2;
+    padCanvas.height = boxH + pad * 2;
+    const padCtx = padCanvas.getContext('2d');
+    padCtx.fillStyle = '#ffffff';
+    padCtx.fillRect(0, 0, padCanvas.width, padCanvas.height);
+    padCtx.drawImage(canvas, startX, startY, boxW, boxH, pad, pad, boxW, boxH);
+
+    const lum = new HTMLCanvasElementLuminanceSource(padCanvas);
+    const bitmap = new BinaryBitmap(new HybridBinarizer(lum));
+    const res = reader.decodeWithState(bitmap);
+    if (res && res.getText()) return res.getText();
+  } catch {
+    // Pass 2 NotFoundException
+  }
+
+  // Pass 3: Quiet zone padding for dark-background or tight-crop barcodes
+  // EAN-13 requires a white margin (quiet zone) before start and stop guard bars.
+  // When an image has a white barcode on a dark background or tightly cropped edges,
+  // we detect the bounding box of the barcode label and pad it with clean white borders.
+  try {
+    const imgData = ctx.getImageData(0, 0, w, h);
+    const data = imgData.data;
+
+    let minX = w, maxX = 0, minY = h, maxY = 0;
+    let whitePixelCount = 0;
+
+    for (let y = 0; y < h; y += 2) {
+      const rowOffset = y * w * 4;
+      for (let x = 0; x < w; x += 2) {
+        const idx = rowOffset + x * 4;
+        const r = data[idx];
+        const g = data[idx + 1];
+        const b = data[idx + 2];
+        const lumVal = (306 * r + 601 * g + 117 * b + 0x200) >> 10;
+        if (lumVal > 180) {
+          if (x < minX) minX = x;
+          if (x > maxX) maxX = x;
+          if (y < minY) minY = y;
+          if (y > maxY) maxY = y;
+          whitePixelCount++;
+        }
       }
     }
-  }, [barcode]);
 
-  const handleSave = () => {
-    if (!svgRef.current) return;
-    try {
-      const svgData = new XMLSerializer().serializeToString(svgRef.current);
-      const svgBlob = new Blob([svgData], { type: 'image/svg+xml;charset=utf-8' });
-      const svgUrl = URL.createObjectURL(svgBlob);
-      const link = document.createElement('a');
-      link.href = svgUrl;
-      link.download = `barcode_${label.replace(/\s+/g, '_')}_${barcode}.svg`;
-      document.body.appendChild(link);
-      link.click();
-      document.body.removeChild(link);
-      URL.revokeObjectURL(svgUrl);
-    } catch (err) {
-      console.warn('Failed to download barcode:', err);
+    if (whitePixelCount > 30 && maxX > minX && maxY > minY) {
+      const boxW = maxX - minX + 1;
+      const boxH = maxY - minY + 1;
+      const pad = 24;
+      const padCanvas = document.createElement('canvas');
+      padCanvas.width = boxW + pad * 2;
+      padCanvas.height = boxH + pad * 2;
+      const padCtx = padCanvas.getContext('2d');
+      padCtx.fillStyle = '#ffffff';
+      padCtx.fillRect(0, 0, padCanvas.width, padCanvas.height);
+      padCtx.drawImage(canvas, minX, minY, boxW, boxH, pad, pad, boxW, boxH);
+
+      const lum = new HTMLCanvasElementLuminanceSource(padCanvas);
+      const bitmap = new BinaryBitmap(new HybridBinarizer(lum));
+      const res = reader.decodeWithState(bitmap);
+      if (res && res.getText()) return res.getText();
     }
-  };
+  } catch {
+    // Pass 3 NotFoundException
+  }
 
-  return (
-    <div className="flex flex-col items-center bg-white rounded-lg p-2 border border-slate-200 shadow-xs relative group">
-      <svg ref={svgRef} className="max-w-full" />
-      <div className="flex items-center justify-between w-full mt-1 px-1">
-        <span className="text-[11px] font-bold text-slate-700 truncate max-w-[110px]">{label}</span>
-        <button
-          type="button"
-          onClick={handleSave}
-          title="Download barcode image"
-          className="text-slate-400 hover:text-brand p-0.5 rounded transition"
-        >
-          <Download size={12} />
-        </button>
-      </div>
-    </div>
-  );
+  return null;
 }
 
-export default function BarcodeScannerModal({
-  isOpen,
-  onClose,
-  products = [],
-  onProductScanned,
-  initialTab = 'camera', // 'camera' or 'upload'
-}) {
-  const [activeTab, setActiveTab]       = useState(initialTab); // 'camera' | 'upload'
-  const [cameras, setCameras]           = useState([]);
-  const [selectedCam, setSelectedCam]   = useState('');
-  const [cameraActive, setCameraActive] = useState(false);
-  const [cameraError, setCameraError]   = useState('');
-  const [soundEnabled, setSoundEnabled] = useState(true);
-  const [lastScanned, setLastScanned]   = useState(null); // { success, product, code, time }
-  const [flashSuccess, setFlashSuccess] = useState(false);
-  const [manualCode, setManualCode]     = useState('');
-  const [showExamples, setShowExamples] = useState(true);
+export default function BarcodeScannerModal({ onScan, onClose, scanError }) {
+  const videoRef = useRef(null);
+  const fileInputRef = useRef(null);
+  const firedRef = useRef(false);
 
-  // Upload image state
-  const [uploadLoading, setUploadLoading] = useState(false);
-  const [uploadError, setUploadError]     = useState('');
-  const [uploadedPreview, setUploadedPreview] = useState(null);
-  const [isDragging, setIsDragging]       = useState(false);
+  const [camError, setCamError] = useState(null);
+  const [localError, setLocalError] = useState(null);
+  const [starting, setStarting] = useState(true);
+  const [canRetry, setCanRetry] = useState(false);
+  const [retryKey, setRetryKey] = useState(0);
+  const [videoDevices, setVideoDevices] = useState([]);
+  const [selectedDeviceIndex, setSelectedDeviceIndex] = useState(0);
 
-  const scannerRef      = useRef(null);
-  const lastScanTimeRef = useRef(0);
-  const lastCodeRef     = useRef('');
-  const fileInputRef    = useRef(null);
+  // Live test diagnostic state (Frame counter & resolution badge)
+  const [scanFrameCount, setScanFrameCount] = useState(0);
+  const [videoRes, setVideoRes] = useState('');
+  const [lastDecoded, setLastDecoded] = useState(null);
 
-  // 3 sample products from database (Milk, Bread, Rice 5kg)
-  const sampleProducts = products
-    .filter((p) => p.barcode && p.barcode.trim())
-    .slice(0, 3);
+  const retry = useCallback(() => {
+    setCamError(null);
+    setLocalError(null);
+    setStarting(true);
+    setCanRetry(false);
+    setScanFrameCount(0);
+    setLastDecoded(null);
+    firedRef.current = false;
+    setRetryKey((k) => k + 1);
+  }, []);
 
-  // Discover webcams when modal opens
-  useEffect(() => {
-    if (!isOpen) return;
+  const switchCamera = useCallback(() => {
+    if (videoDevices.length <= 1) return;
+    setSelectedDeviceIndex((prev) => (prev + 1) % videoDevices.length);
+    retry();
+  }, [videoDevices, retry]);
 
-    let isMounted = true;
-    Html5Qrcode.getCameras()
-      .then((devices) => {
-        if (!isMounted) return;
-        if (devices && devices.length) {
-          setCameras(devices);
-          const envCam = devices.find((d) => d.label.toLowerCase().includes('back') || d.label.toLowerCase().includes('environment'));
-          setSelectedCam(envCam ? envCam.id : devices[0].id);
-        } else {
-          setCameraError('No webcam or camera detected on your device.');
-        }
-      })
-      .catch((err) => {
-        if (!isMounted) return;
-        console.warn('[BarcodeScanner] getCameras error:', err);
-        setCameraError('Please allow camera permissions in your browser to scan barcodes.');
-      });
+  // Audio feedback on successful scan
+  const playBeep = useCallback(() => {
+    try {
+      const AudioCtx = window.AudioContext || window.webkitAudioContext;
+      if (!AudioCtx) return;
+      const ctx = new AudioCtx();
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = 'sine';
+      osc.frequency.setValueAtTime(1046.5, ctx.currentTime); // C6 note
+      gain.gain.setValueAtTime(0.2, ctx.currentTime);
+      gain.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.12);
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+      osc.start();
+      osc.stop(ctx.currentTime + 0.12);
+    } catch {
+      // Ignore autoplay block
+    }
+  }, []);
 
-    return () => { isMounted = false; };
-  }, [isOpen]);
+  const handleSuccessfulDecode = useCallback((text) => {
+    if (!text || firedRef.current) return;
+    firedRef.current = true;
+    setLastDecoded(text);
+    playBeep();
+    onScan(text);
+  }, [onScan, playBeep]);
 
-  // Start / Stop camera when in camera tab
-  useEffect(() => {
-    if (!isOpen || activeTab !== 'camera' || !selectedCam) return;
+  // Handle uploaded/dropped barcode image
+  const processImageFile = useCallback((file) => {
+    if (!file) return;
+    setLocalError(null);
 
-    const html5QrCode = new Html5Qrcode('barcode-reader-viewport', {
-      formatsToSupport: [
-        Html5QrcodeSupportedFormats.EAN_13,
-        Html5QrcodeSupportedFormats.EAN_8,
-        Html5QrcodeSupportedFormats.CODE_128,
-        Html5QrcodeSupportedFormats.CODE_39,
-        Html5QrcodeSupportedFormats.UPC_A,
-        Html5QrcodeSupportedFormats.UPC_E,
-        Html5QrcodeSupportedFormats.QR_CODE,
-      ],
-      verbose: false,
-      experimentalFeatures: {
-        useBarCodeDetectorIfSupported: true,
-      },
-    });
-    scannerRef.current = html5QrCode;
+    const img = new Image();
+    const url = URL.createObjectURL(file);
+    img.onload = () => {
+      URL.revokeObjectURL(url);
+      const canvas = document.createElement('canvas');
+      const ctx = canvas.getContext('2d', { willReadFrequently: true });
+      canvas.width = img.naturalWidth || img.width;
+      canvas.height = img.naturalHeight || img.height;
+      ctx.drawImage(img, 0, 0);
 
-    const config = {
-      fps: 20,
-      qrbox: (viewfinderWidth, viewfinderHeight) => ({
-        width: Math.min(320, Math.floor(viewfinderWidth * 0.85)),
-        height: Math.min(200, Math.floor(viewfinderHeight * 0.7)),
-      }),
-      aspectRatio: 1.333,
+      // Create reader with explicit retail 1D + 2D formats
+      const reader = new MultiFormatReader();
+      const hints = new Map();
+      hints.set(DecodeHintType.POSSIBLE_FORMATS, [
+        BarcodeFormat.EAN_13,
+        BarcodeFormat.UPC_A,
+        BarcodeFormat.UPC_E,
+        BarcodeFormat.CODE_128,
+        BarcodeFormat.CODE_39,
+        BarcodeFormat.EAN_8,
+        BarcodeFormat.ITF,
+        BarcodeFormat.QR_CODE,
+      ]);
+      hints.set(DecodeHintType.TRY_HARDER, true);
+      reader.setHints(hints);
+
+      const decoded = decodeCanvas(canvas, ctx, reader);
+      if (decoded) {
+        console.log('[BarcodeScanner] Image file successfully decoded:', decoded);
+        handleSuccessfulDecode(decoded);
+      } else {
+        setLocalError('No barcode or QR code detected in this image. Ensure the barcode is clear and fully visible.');
+      }
     };
+    img.onerror = () => {
+      setLocalError('Failed to load image file.');
+    };
+    img.src = url;
+  }, [handleSuccessfulDecode]);
 
-    html5QrCode
-      .start(
-        selectedCam,
-        config,
-        (decodedText) => {
-          handleDecodedBarcode(decodedText);
-        },
-        () => {}
-      )
-      .then(() => {
-        setCameraActive(true);
-        setCameraError('');
-      })
-      .catch((err) => {
-        console.error('[BarcodeScanner] Camera start error:', err);
-        setCameraActive(false);
-        setCameraError(err.message || 'Could not start camera video stream.');
-      });
+  useEffect(() => {
+    let mounted = true;
+    let stream = null;
+    let animFrame = null;
+
+    // ── Explicitly enable 1D retail formats + TRY_HARDER ──────────────────
+    const reader = new MultiFormatReader();
+    const hints = new Map();
+    hints.set(DecodeHintType.POSSIBLE_FORMATS, [
+      BarcodeFormat.EAN_13,
+      BarcodeFormat.UPC_A,
+      BarcodeFormat.UPC_E,
+      BarcodeFormat.CODE_128,
+      BarcodeFormat.CODE_39,
+      BarcodeFormat.EAN_8,
+      BarcodeFormat.ITF,
+      BarcodeFormat.QR_CODE,
+    ]);
+    hints.set(DecodeHintType.TRY_HARDER, true);
+    reader.setHints(hints);
+
+    const canvas = document.createElement('canvas');
+    const ctx = canvas.getContext('2d', { willReadFrequently: true });
+
+    function stopAll() {
+      mounted = false;
+      cancelAnimationFrame(animFrame);
+      if (stream) {
+        stream.getTracks().forEach((t) => t.stop());
+        stream = null;
+      }
+      if (videoRef.current) videoRef.current.srcObject = null;
+    }
+
+    let lastScanTimestamp = 0;
+    const SCAN_INTERVAL_MS = 80; // ~12 scans/sec for responsive detection without CPU lock
+    let frameCount = 0;
+
+    // ── Continuous scan loop ──────────────────────────────────────────────
+    function scanFrame(timestamp) {
+      if (!mounted) return;
+      const video = videoRef.current;
+
+      // Condition: video has loaded dimensions and is actively streaming
+      if (video && video.videoWidth > 0 && !video.paused) {
+        if (!lastScanTimestamp || timestamp - lastScanTimestamp >= SCAN_INTERVAL_MS) {
+          lastScanTimestamp = timestamp;
+          frameCount++;
+
+          let w = video.videoWidth;
+          let h = video.videoHeight;
+          const maxDim = 1280;
+          if (w > maxDim) {
+            h = Math.round((h * maxDim) / w);
+            w = maxDim;
+          }
+          canvas.width = w;
+          canvas.height = h;
+          ctx.drawImage(video, 0, 0, w, h);
+
+          // Update visible on-screen HUD state every 4 frames
+          if (frameCount % 4 === 0) {
+            setScanFrameCount(frameCount);
+            setVideoRes(`${w}×${h}`);
+          }
+
+          // Diagnostic console log every 20 frames
+          if (frameCount % 20 === 0) {
+            console.log(`[BarcodeScanner] Continuous loop active — frame #${frameCount} (${w}×${h}), searching 1D/2D...`);
+          }
+
+          try {
+            const decoded = decodeCanvas(canvas, ctx, reader);
+            if (decoded && !firedRef.current) {
+              console.log(`[BarcodeScanner] ✅ SUCCESS on frame #${frameCount}! Decoded barcode:`, decoded);
+              handleSuccessfulDecode(decoded);
+              return; // Stop continuous loop once barcode is successfully decoded
+            }
+          } catch {
+            // NotFoundException on individual frames is normal — silently retry on next frame
+          }
+        }
+      }
+
+      // Silently retry on next frame — continuous loop never stops
+      animFrame = requestAnimationFrame(scanFrame);
+    }
+
+    // ── Start Camera with high resolution ─────────────────────────────────
+    async function startScanner() {
+      try {
+        if (navigator.mediaDevices.enumerateDevices) {
+          try {
+            const devices = await navigator.mediaDevices.enumerateDevices();
+            const vDevs = devices.filter((d) => d.kind === 'videoinput');
+            if (mounted) setVideoDevices(vDevs);
+          } catch {
+            // Ignore enumeration failure
+          }
+        }
+
+        const deviceConstraint =
+          videoDevices.length > selectedDeviceIndex && videoDevices[selectedDeviceIndex]?.deviceId
+            ? { exact: videoDevices[selectedDeviceIndex].deviceId }
+            : undefined;
+
+        // Request high resolution (1280x720) so thin barcode lines remain crisp
+        let streamObj;
+        try {
+          streamObj = await navigator.mediaDevices.getUserMedia({
+            video: deviceConstraint
+              ? {
+                  deviceId: deviceConstraint,
+                  width: { ideal: 1280, min: 1280 },
+                  height: { ideal: 720, min: 720 },
+                }
+              : {
+                  facingMode: { ideal: 'environment' },
+                  width: { ideal: 1280, min: 1280 },
+                  height: { ideal: 720, min: 720 },
+                },
+          });
+        } catch {
+          // Graceful fallback if webcam does not meet strict min: 1280 constraint
+          streamObj = await navigator.mediaDevices.getUserMedia({
+            video: deviceConstraint
+              ? {
+                  deviceId: deviceConstraint,
+                  width: { ideal: 1280 },
+                  height: { ideal: 720 },
+                }
+              : {
+                  facingMode: { ideal: 'environment' },
+                  width: { ideal: 1280 },
+                  height: { ideal: 720 },
+                },
+          });
+        }
+
+        stream = streamObj;
+
+        if (!mounted) {
+          stream.getTracks().forEach((t) => t.stop());
+          stream = null;
+          return;
+        }
+
+        videoRef.current.srcObject = stream;
+        await videoRef.current.play();
+
+        if (!mounted) return;
+        setStarting(false);
+        const actualW = videoRef.current.videoWidth || 1280;
+        const actualH = videoRef.current.videoHeight || 720;
+        setVideoRes(`${actualW}×${actualH}`);
+        console.log(`[BarcodeScanner] Camera started at ${actualW}×${actualH}. Formats: EAN_13, UPC_A, UPC_E, CODE_128`);
+        animFrame = requestAnimationFrame(scanFrame);
+
+      } catch (err) {
+        if (!mounted) return;
+
+        let msg;
+        if (err.name === 'NotAllowedError') {
+          msg = 'Camera permission denied. Click the camera icon in your browser address bar to allow access, then Try Again.';
+        } else if (err.name === 'NotFoundError' || err.name === 'DevicesNotFoundError') {
+          msg = 'No camera device found on this system.';
+        } else if (err.name === 'NotReadableError') {
+          msg = 'Camera is currently locked by another application (Teams, Zoom, Windows Camera). Please close it and click Try Again.';
+        } else {
+          msg = `Camera error (${err.name}): ${err.message}`;
+        }
+
+        setCamError(msg);
+        setStarting(false);
+        setCanRetry(true);
+      }
+    }
+
+    const delayTimer = setTimeout(startScanner, 500);
 
     return () => {
-      if (scannerRef.current) {
-        if (scannerRef.current.isScanning) {
-          scannerRef.current.stop().catch(() => {}).finally(() => {
-            scannerRef.current?.clear();
-          });
-        } else {
-          scannerRef.current.clear();
-        }
-      }
-      setCameraActive(false);
+      clearTimeout(delayTimer);
+      stopAll();
     };
-  }, [isOpen, activeTab, selectedCam]);
+  }, [handleSuccessfulDecode, retryKey, selectedDeviceIndex]);
 
-  // Process detected or entered barcode
-  const handleDecodedBarcode = (code) => {
-    const cleanCode = String(code).trim();
-    if (!cleanCode) return;
-
-    const now = Date.now();
-    // 1.8s debounce for the exact same barcode
-    if (cleanCode === lastCodeRef.current && (now - lastScanTimeRef.current) < 1800) {
-      return;
-    }
-
-    lastCodeRef.current = cleanCode;
-    lastScanTimeRef.current = now;
-
-    // Search in database products (match barcode, sku, or id)
-    const matched = products.find(
-      (p) => String(p.barcode).trim() === cleanCode || String(p.sku).trim() === cleanCode || String(p.id) === cleanCode
-    );
-
-    if (soundEnabled) {
-      playPosBeep();
-    }
-
-    setFlashSuccess(true);
-    setTimeout(() => setFlashSuccess(false), 500);
-
-    if (matched) {
-      setLastScanned({
-        success: true,
-        product: matched,
-        code: cleanCode,
-        time: new Date().toLocaleTimeString(),
-      });
-      onProductScanned(matched);
-    } else {
-      setLastScanned({
-        success: false,
-        product: null,
-        code: cleanCode,
-        time: new Date().toLocaleTimeString(),
-      });
-    }
-  };
-
-  // Decode barcode from image file
-  const processImageFile = async (file) => {
-    if (!file || !file.type.startsWith('image/')) {
-      setUploadError('Please select a valid image file (PNG, JPG, WEBP).');
-      return;
-    }
-
-    setUploadLoading(true);
-    setUploadError('');
-
-    // Preview
-    const reader = new FileReader();
-    reader.onload = (e) => setUploadedPreview(e.target.result);
-    reader.readAsDataURL(file);
-
-    let decodedText = null;
-
-    // 1. First try native BarcodeDetector API if supported
-    if ('BarcodeDetector' in window) {
-      try {
-        const formats = await window.BarcodeDetector.getSupportedFormats?.() || [
-          'ean_13', 'ean_8', 'code_128', 'code_39', 'upc_a', 'upc_e', 'qr_code'
-        ];
-        const detector = new window.BarcodeDetector({ formats });
-        const imageBitmap = await createImageBitmap(file);
-        const barcodes = await detector.detect(imageBitmap);
-        if (barcodes.length > 0 && barcodes[0].rawValue) {
-          decodedText = barcodes[0].rawValue;
-        }
-      } catch (detErr) {
-        console.warn('BarcodeDetector error:', detErr);
-      }
-    }
-
-    // 2. Fallback to Html5Qrcode.scanFile
-    if (!decodedText) {
-      try {
-        const fileScanner = new Html5Qrcode('barcode-file-scan-temp', {
-          formatsToSupport: [
-            Html5QrcodeSupportedFormats.EAN_13,
-            Html5QrcodeSupportedFormats.EAN_8,
-            Html5QrcodeSupportedFormats.CODE_128,
-            Html5QrcodeSupportedFormats.CODE_39,
-            Html5QrcodeSupportedFormats.UPC_A,
-            Html5QrcodeSupportedFormats.UPC_E,
-            Html5QrcodeSupportedFormats.QR_CODE,
-          ],
-          verbose: false,
-          experimentalFeatures: {
-            useBarCodeDetectorIfSupported: true,
-          },
-        });
-
-        decodedText = await fileScanner.scanFile(file, false);
-        fileScanner.clear();
-      } catch (scanErr) {
-        console.warn('Html5Qrcode.scanFile error:', scanErr);
-      }
-    }
-
-    setUploadLoading(false);
-
-    if (decodedText) {
-      setUploadError('');
-      handleDecodedBarcode(decodedText);
-    } else {
-      setUploadError('Could not detect a barcode in this image. Please ensure the barcode is clear, centered, and well-lit.');
-    }
-  };
-
-  const handleFileChange = (e) => {
-    const file = e.target.files?.[0];
-    if (file) processImageFile(file);
-  };
-
-  const handleDrop = (e) => {
-    e.preventDefault();
-    setIsDragging(false);
-    const file = e.dataTransfer?.files?.[0];
-    if (file) processImageFile(file);
-  };
-
-  const handleManualSubmit = (e) => {
-    e.preventDefault();
-    if (manualCode.trim()) {
-      handleDecodedBarcode(manualCode.trim());
-      setManualCode('');
-    }
-  };
-
-  if (!isOpen) return null;
-
+  /* ─── Render ─────────────────────────────────────────────────────────────── */
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 backdrop-blur-xs p-4 overflow-y-auto animate-in fade-in duration-200">
-      <div className="relative w-full max-w-2xl rounded-2xl bg-white shadow-2xl overflow-hidden my-4 border border-slate-200">
+    <>
+      <div
+        onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}
+        style={{
+          position: 'fixed', inset: 0, zIndex: 9999,
+          background: 'rgba(10,14,26,0.88)',
+          backdropFilter: 'blur(8px)',
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+          padding: 16,
+        }}
+      >
+        <div style={{
+          width: '100%', maxWidth: 430,
+          background: '#fff', borderRadius: 24, overflow: 'hidden',
+          boxShadow: '0 32px 80px rgba(0,0,0,0.55)',
+          display: 'flex', flexDirection: 'column',
+        }}>
 
-        {/* Hidden container for temp file decoding */}
-        <div id="barcode-file-scan-temp" className="hidden" />
-
-        {/* Header */}
-        <div className="flex items-center justify-between border-b border-slate-100 bg-slate-50/80 px-6 py-4">
-          <div className="flex items-center gap-2.5">
-            <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-blue-100 text-brand">
-              <Camera size={18} />
+          {/* Header */}
+          <div style={{
+            display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+            padding: '16px 20px 14px',
+            borderBottom: '1px solid #eef2ff',
+            background: 'linear-gradient(135deg,#335cff0a 0%,#fff 100%)',
+          }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
+              <span style={{
+                display: 'grid', placeItems: 'center',
+                width: 36, height: 36, borderRadius: 10,
+                background: '#335CFF', color: '#fff', flexShrink: 0,
+              }}>
+                <Camera size={18} />
+              </span>
+              <div>
+                <p style={{ margin: 0, fontWeight: 800, fontSize: 15, color: '#1e293b' }}>
+                  Scan Barcode
+                </p>
+                <p style={{ margin: 0, fontSize: 11, color: '#64748b' }}>
+                  EAN-13 · UPC · Code-128 · QR
+                </p>
+              </div>
             </div>
-            <div>
-              <h3 className="font-extrabold text-base text-slate-800">Barcode Scanner & Image Reader</h3>
-              <p className="text-xs text-slate-500">Scan with your webcam or upload a barcode image to add items to the cart</p>
-            </div>
-          </div>
-
-          <div className="flex items-center gap-2">
-            <button
-              onClick={() => setSoundEnabled((v) => !v)}
-              title={soundEnabled ? 'Mute beep' : 'Enable beep'}
-              className="rounded-lg p-2 text-slate-500 hover:bg-slate-200 transition-colors"
-            >
-              {soundEnabled ? <Volume2 size={18} className="text-brand" /> : <VolumeX size={18} />}
-            </button>
-            <button
-              onClick={onClose}
-              className="rounded-lg p-2 text-slate-400 hover:bg-slate-200 hover:text-slate-700 transition-colors"
-            >
-              <X size={18} />
-            </button>
-          </div>
-        </div>
-
-        {/* Mode Selector Tabs (Camera vs Upload Image) */}
-        <div className="flex border-b border-slate-200 bg-slate-100/60 px-6 pt-3 gap-2">
-          <button
-            type="button"
-            onClick={() => setActiveTab('camera')}
-            className={`flex items-center gap-2 px-4 py-2 text-xs font-bold rounded-t-xl transition-colors border-t border-x ${
-              activeTab === 'camera'
-                ? 'bg-white text-brand border-slate-200 shadow-xs'
-                : 'text-slate-600 hover:text-slate-900 border-transparent'
-            }`}
-          >
-            <Camera size={15} />
-            Live Laptop Camera
-          </button>
-          <button
-            type="button"
-            onClick={() => setActiveTab('upload')}
-            className={`flex items-center gap-2 px-4 py-2 text-xs font-bold rounded-t-xl transition-colors border-t border-x ${
-              activeTab === 'upload'
-                ? 'bg-white text-brand border-slate-200 shadow-xs'
-                : 'text-slate-600 hover:text-slate-900 border-transparent'
-            }`}
-          >
-            <UploadCloud size={15} />
-            Upload Barcode Image
-          </button>
-        </div>
-
-        {/* Body */}
-        <div className="p-6 space-y-5">
-
-          {/* TAB 1: LIVE CAMERA */}
-          {activeTab === 'camera' && (
-            <div className="space-y-3">
-              {cameras.length > 1 && (
-                <div className="flex items-center justify-between text-xs">
-                  <div className="flex items-center gap-2">
-                    <span className="font-bold text-slate-600">Camera Device:</span>
-                    <select
-                      className="field text-xs py-1"
-                      value={selectedCam}
-                      onChange={(e) => setSelectedCam(e.target.value)}
-                    >
-                      {cameras.map((c) => (
-                        <option key={c.id} value={c.id}>
-                          {c.label || `Camera ${c.id.slice(0, 5)}`}
-                        </option>
-                      ))}
-                    </select>
-                  </div>
-                </div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              {videoDevices.length > 1 && (
+                <button
+                  type="button"
+                  onClick={switchCamera}
+                  title="Switch camera"
+                  style={{
+                    display: 'grid', placeItems: 'center', width: 32, height: 32,
+                    borderRadius: 8, border: 'none', cursor: 'pointer',
+                    background: '#f1f5f9', color: '#475569', flexShrink: 0,
+                  }}
+                >
+                  <SwitchCamera size={16} />
+                </button>
               )}
-
-              {/* Viewport with Animated Laser and Reticle */}
-              <div
-                className="relative overflow-hidden rounded-2xl bg-slate-950 border-2 transition-all duration-300"
+              <button
+                type="button"
+                onClick={() => fileInputRef.current?.click()}
+                title="Upload barcode image"
                 style={{
-                  borderColor: flashSuccess ? '#10b981' : '#3b82f6',
-                  boxShadow: flashSuccess ? '0 0 25px rgba(16,185,129,0.5)' : 'none',
+                  display: 'grid', placeItems: 'center', width: 32, height: 32,
+                  borderRadius: 8, border: 'none', cursor: 'pointer',
+                  background: '#f1f5f9', color: '#475569', flexShrink: 0,
                 }}
               >
-                <div id="barcode-reader-viewport" className="w-full min-h-[250px] max-h-[320px]" />
-
-                {cameraActive && (
-                  <div className="pointer-events-none absolute inset-0 flex items-center justify-center">
-                    <div className="relative w-64 h-36 border-2 border-dashed border-blue-400/80 rounded-xl flex items-center justify-center">
-                      <div className="absolute -top-1 -left-1 w-4 h-4 border-t-2 border-l-2 border-blue-400" />
-                      <div className="absolute -top-1 -right-1 w-4 h-4 border-t-2 border-r-2 border-blue-400" />
-                      <div className="absolute -bottom-1 -left-1 w-4 h-4 border-b-2 border-l-2 border-blue-400" />
-                      <div className="absolute -bottom-1 -right-1 w-4 h-4 border-b-2 border-r-2 border-blue-400" />
-                      <div className="absolute left-2 right-2 h-0.5 bg-gradient-to-r from-transparent via-red-500 to-transparent shadow-[0_0_8px_#ef4444] animate-bounce" />
-                    </div>
-                  </div>
-                )}
-
-                {!cameraActive && (
-                  <div className="absolute inset-0 flex flex-col items-center justify-center p-6 text-center text-white bg-slate-900/90">
-                    {cameraError ? (
-                      <>
-                        <AlertTriangle size={32} className="text-amber-400 mb-2" />
-                        <p className="text-sm font-bold text-amber-200">{cameraError}</p>
-                        <p className="text-xs text-slate-400 mt-1 max-w-sm">
-                          Switch to the <b>Upload Barcode Image</b> tab or use the test barcodes below.
-                        </p>
-                      </>
-                    ) : (
-                      <>
-                        <RefreshCw size={28} className="animate-spin text-brand mb-2" />
-                        <p className="text-sm font-bold">Connecting to camera...</p>
-                        <p className="text-xs text-slate-400 mt-1">Please allow camera permissions if prompted.</p>
-                      </>
-                    )}
-                  </div>
-                )}
-              </div>
-
-              {/* Phone Screen Scanning Tips */}
-              <div className="flex items-start gap-2 rounded-xl bg-blue-50/80 p-3 text-xs text-slate-600 border border-blue-100">
-                <Info size={16} className="text-brand shrink-0 mt-0.5" />
-                <div>
-                  <p className="font-bold text-brand">💡 Tips when scanning barcodes from a mobile phone screen:</p>
-                  <ul className="list-disc pl-4 mt-1 space-y-0.5 text-slate-600">
-                    <li>Hold your phone <b>15–25 cm (6–10 inches)</b> away from the laptop webcam so the camera can focus sharply.</li>
-                    <li>Avoid holding too close (laptop webcams have fixed focus and blur at close distances).</li>
-                    <li>Set your phone brightness to medium to prevent screen glare.</li>
-                  </ul>
-                </div>
-              </div>
-            </div>
-          )}
-
-          {/* TAB 2: UPLOAD BARCODE IMAGE */}
-          {activeTab === 'upload' && (
-            <div className="space-y-4">
+                <Upload size={16} />
+              </button>
               <input
-                type="file"
                 ref={fileInputRef}
+                type="file"
                 accept="image/*"
-                onChange={handleFileChange}
-                className="hidden"
+                style={{ display: 'none' }}
+                onChange={(e) => {
+                  processImageFile(e.target.files?.[0]);
+                  e.target.value = '';
+                }}
               />
-
-              {/* Dropzone */}
-              <div
-                onDragOver={(e) => { e.preventDefault(); setIsDragging(true); }}
-                onDragLeave={() => setIsDragging(false)}
-                onDrop={handleDrop}
-                onClick={() => fileInputRef.current?.click()}
-                className={`flex flex-col items-center justify-center p-8 border-2 border-dashed rounded-2xl cursor-pointer transition-all ${
-                  isDragging
-                    ? 'border-brand bg-blue-50/70 scale-[0.99]'
-                    : 'border-slate-300 bg-slate-50/80 hover:bg-slate-100 hover:border-brand/70'
-                }`}
-              >
-                {uploadLoading ? (
-                  <div className="flex flex-col items-center py-4">
-                    <RefreshCw size={36} className="animate-spin text-brand mb-3" />
-                    <p className="font-bold text-sm text-slate-700">Analyzing image for barcodes…</p>
-                    <p className="text-xs text-slate-400 mt-1">Detecting EAN-13, CODE-128, UPC, and QR barcodes</p>
-                  </div>
-                ) : uploadedPreview ? (
-                  <div className="flex flex-col items-center">
-                    <img
-                      src={uploadedPreview}
-                      alt="Uploaded barcode"
-                      className="max-h-40 rounded-lg border border-slate-200 shadow-sm object-contain mb-3"
-                    />
-                    <p className="text-xs font-bold text-brand flex items-center gap-1.5">
-                      <ImageIcon size={14} /> Click to upload a different image
-                    </p>
-                  </div>
-                ) : (
-                  <>
-                    <div className="flex h-14 w-14 items-center justify-center rounded-2xl bg-blue-100 text-brand mb-3">
-                      <UploadCloud size={28} />
-                    </div>
-                    <p className="font-extrabold text-sm text-slate-800">
-                      Click to choose an image, or drag & drop here
-                    </p>
-                    <p className="text-xs text-slate-500 mt-1 text-center">
-                      Upload any photo, packaging picture, or screenshot of a barcode (PNG, JPG, WEBP)
-                    </p>
-                    <span className="mt-3 rounded-lg bg-white px-3.5 py-1.5 text-xs font-bold text-brand border border-slate-200 shadow-2xs">
-                      Browse Files
-                    </span>
-                  </>
-                )}
-              </div>
-
-              {uploadError && (
-                <div className="flex items-center gap-2 rounded-xl bg-red-50 p-3 text-xs font-semibold text-red-600 border border-red-200">
-                  <AlertTriangle size={15} className="shrink-0" />
-                  {uploadError}
-                </div>
-              )}
+              <button id="barcode-scanner-close" onClick={onClose}
+                style={{
+                  display: 'grid', placeItems: 'center', width: 32, height: 32,
+                  borderRadius: 8, border: 'none', cursor: 'pointer',
+                  background: '#f1f5f9', color: '#64748b', flexShrink: 0,
+                }}>
+                <X size={16} />
+              </button>
             </div>
-          )}
+          </div>
 
-          {/* Scanned Result Card */}
-          {lastScanned && (
-            <div className={`flex items-center justify-between rounded-xl p-3.5 border transition-all animate-in slide-in-from-top-2 ${
-              lastScanned.success
-                ? 'bg-emerald-50 border-emerald-300 text-emerald-800'
-                : 'bg-amber-50 border-amber-300 text-amber-800'
-            }`}>
-              <div className="flex items-center gap-3">
-                <div className={`p-2 rounded-lg ${lastScanned.success ? 'bg-emerald-200 text-emerald-800' : 'bg-amber-200 text-amber-800'}`}>
-                  {lastScanned.success ? <CheckCircle2 size={20} /> : <AlertTriangle size={20} />}
-                </div>
-                <div>
-                  {lastScanned.success ? (
-                    <>
-                      <div className="flex items-center gap-2">
-                        <span className="font-extrabold text-sm text-slate-900">{lastScanned.product.name}</span>
-                        <span className="rounded-full bg-emerald-200 px-2 py-0.5 text-[11px] font-bold text-emerald-800">
-                          + Added to cart
-                        </span>
-                      </div>
-                      <p className="text-xs text-slate-600 mt-0.5">
-                        Price: ₹{lastScanned.product.price} · Barcode: {lastScanned.code} · In Stock: {lastScanned.product.stock}
-                      </p>
-                    </>
-                  ) : (
-                    <>
-                      <p className="font-bold text-sm">Unknown Barcode: {lastScanned.code}</p>
-                      <p className="text-xs text-amber-700">This barcode does not match any product in your database.</p>
-                    </>
-                  )}
-                </div>
-              </div>
-              <span className="text-[11px] font-semibold text-slate-400 shrink-0">{lastScanned.time}</span>
-            </div>
-          )}
+          {/* Camera area */}
+          <div style={{ position: 'relative', background: '#0f172a', lineHeight: 0, minHeight: 280 }}>
 
-          {/* Manual Barcode Input */}
-          <form onSubmit={handleManualSubmit} className="flex gap-2">
-            <input
-              type="text"
-              placeholder="Or enter barcode / SKU manually (e.g. 8901030826825)…"
-              value={manualCode}
-              onChange={(e) => setManualCode(e.target.value)}
-              className="field flex-1 text-xs"
+            <video
+              ref={videoRef}
+              muted
+              playsInline
+              style={{
+                width: '100%', minHeight: 280, maxHeight: 340,
+                display: 'block', objectFit: 'cover', background: '#0f172a',
+              }}
             />
-            <button type="submit" className="btn-primary text-xs px-4 py-2 shrink-0">
-              Add Item
-            </button>
-          </form>
 
-          {/* 3 Real Database Products with Scannable Barcodes & Instant Tests */}
-          <div className="border border-slate-200 rounded-xl bg-slate-50/70 p-4">
-            <div className="flex items-center justify-between mb-3">
-              <div className="flex items-center gap-1.5">
-                <Sparkles size={15} className="text-amber-500" />
-                <span className="font-bold text-xs text-slate-700 uppercase tracking-wide">
-                  Test Barcodes from Your Database (3 Sample Products)
+            {/* Live scan diagnostics HUD badge */}
+            {!camError && !starting && (
+              <div style={{
+                position: 'absolute', top: 10, left: 12, right: 12,
+                display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+                padding: '6px 12px', borderRadius: 8,
+                background: 'rgba(15, 23, 42, 0.84)', backdropFilter: 'blur(4px)',
+                border: '1px solid rgba(255, 255, 255, 0.12)',
+                color: '#cbd5e1', fontSize: 11, fontFamily: 'monospace',
+                pointerEvents: 'none', zIndex: 10,
+              }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                  <span style={{
+                    width: 8, height: 8, borderRadius: '50%',
+                    background: lastDecoded ? '#22c55e' : '#38bdf8',
+                    boxShadow: lastDecoded ? '0 0 8px #22c55e' : '0 0 6px #38bdf8',
+                    animation: 'bsm_pulse 1.2s ease-in-out infinite',
+                    display: 'inline-block',
+                  }} />
+                  <span style={{ fontWeight: 700, color: lastDecoded ? '#4ade80' : '#f8fafc' }}>
+                    {lastDecoded ? `FOUND: ${lastDecoded}` : `SCANNING (Frame #${scanFrameCount})`}
+                  </span>
+                </div>
+                <span style={{ color: '#94a3b8' }}>
+                  {videoRes ? `${videoRes} · 1D Active` : '1280×720 · 1D Active'}
                 </span>
+              </div>
+            )}
+
+            {/* Scan frame overlay — wide rectangle tailored for horizontal 1D barcodes */}
+            {!camError && !starting && (
+              <div style={{
+                position: 'absolute', inset: 0, pointerEvents: 'none',
+                display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
+                gap: 10,
+              }}>
+                <div style={{
+                  width: '84%', maxWidth: 330, height: 110, position: 'relative',
+                  boxShadow: '0 0 0 9999px rgba(15, 23, 42, 0.42)',
+                  borderRadius: 12,
+                }}>
+                  {/* Animated red laser scanning line */}
+                  <div style={{
+                    position: 'absolute', left: 4, right: 4, height: 2,
+                    background: 'linear-gradient(90deg, transparent, #ef4444 30%, #ef4444 70%, transparent)',
+                    boxShadow: '0 0 8px #ef4444',
+                    borderRadius: 2, animation: 'bsm_scan 1.8s ease-in-out infinite',
+                  }} />
+
+                  {/* Corner brackets */}
+                  {[
+                    { top: -2,    left: -2,  borderTop: '3px solid #335CFF',    borderLeft: '3px solid #335CFF',  borderRadius: '8px 0 0 0' },
+                    { top: -2,    right: -2, borderTop: '3px solid #335CFF',    borderRight: '3px solid #335CFF', borderRadius: '0 8px 0 0' },
+                    { bottom: -2, left: -2,  borderBottom: '3px solid #335CFF', borderLeft: '3px solid #335CFF',  borderRadius: '0 0 0 8px' },
+                    { bottom: -2, right: -2, borderBottom: '3px solid #335CFF', borderRight: '3px solid #335CFF', borderRadius: '0 0 8px 0' },
+                  ].map((s, i) => (
+                    <div key={i} style={{ position: 'absolute', width: 28, height: 22, ...s }} />
+                  ))}
+                </div>
+
+                <p style={{
+                  color: '#e2e8f0', fontSize: 11, fontWeight: 600, margin: 0,
+                  textShadow: '0 1px 3px rgba(0,0,0,0.85)',
+                }}>
+                  Align horizontal barcode within rectangle
+                </p>
+              </div>
+            )}
+
+            {/* Starting spinner */}
+            {starting && !camError && (
+              <div style={{
+                position: 'absolute', inset: 0, background: '#0f172a',
+                display: 'flex', flexDirection: 'column',
+                alignItems: 'center', justifyContent: 'center', gap: 12,
+              }}>
+                <div style={{
+                  width: 36, height: 36, borderRadius: '50%',
+                  border: '3px solid #335cff30', borderTop: '3px solid #335CFF',
+                  animation: 'bsm_spin 0.9s linear infinite',
+                }} />
+                <p style={{ color: '#94a3b8', fontSize: 13, margin: 0 }}>Starting high-res camera…</p>
+              </div>
+            )}
+
+            {/* Error */}
+            {camError && (
+              <div style={{
+                position: 'absolute', inset: 0, background: '#0f172a',
+                display: 'flex', flexDirection: 'column',
+                alignItems: 'center', justifyContent: 'center',
+                gap: 14, padding: 28, textAlign: 'center',
+              }}>
+                <div style={{
+                  width: 52, height: 52, borderRadius: 14,
+                  background: '#fee2e2', display: 'grid', placeItems: 'center',
+                }}>
+                  <AlertCircle size={26} color="#ef4444" />
+                </div>
+                <p style={{ color: '#cbd5e1', fontSize: 14, margin: 0, lineHeight: 1.6 }}>
+                  {camError}
+                </p>
+                <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap', justifyContent: 'center' }}>
+                  {canRetry && (
+                    <button onClick={retry} style={{
+                      display: 'inline-flex', alignItems: 'center', gap: 6,
+                      padding: '9px 20px', background: '#335CFF', color: '#fff',
+                      border: 'none', borderRadius: 9, fontSize: 13, fontWeight: 700, cursor: 'pointer',
+                    }}>
+                      <RefreshCw size={14} /> Try Again
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    onClick={() => fileInputRef.current?.click()}
+                    style={{
+                      display: 'inline-flex', alignItems: 'center', gap: 6,
+                      padding: '9px 20px', background: '#335CFF', color: '#fff',
+                      border: 'none', borderRadius: 9, fontSize: 13, fontWeight: 700, cursor: 'pointer',
+                    }}
+                  >
+                    <Upload size={14} /> Upload image
+                  </button>
+                  <button onClick={onClose} style={{
+                    padding: '9px 20px', background: '#334155', color: '#cbd5e1',
+                    border: 'none', borderRadius: 9, fontSize: 13, fontWeight: 600, cursor: 'pointer',
+                  }}>
+                    Manual search
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* Local decode error (e.g. from image upload) */}
+          {localError && (
+            <div style={{
+              display: 'flex', alignItems: 'center', gap: 8,
+              padding: '11px 20px', background: '#fef2f2', borderTop: '1px solid #fecaca',
+            }}>
+              <AlertCircle size={15} color="#ef4444" style={{ flexShrink: 0 }} />
+              <p style={{ margin: 0, fontSize: 13, color: '#b91c1c', fontWeight: 600 }}>{localError}</p>
+            </div>
+          )}
+
+          {/* Scan-not-found error */}
+          {scanError && !localError && (
+            <div style={{
+              display: 'flex', alignItems: 'center', gap: 8,
+              padding: '11px 20px', background: '#fff7ed', borderTop: '1px solid #fed7aa',
+            }}>
+              <AlertCircle size={15} color="#f97316" style={{ flexShrink: 0 }} />
+              <p style={{ margin: 0, fontSize: 13, color: '#c2410c', fontWeight: 600 }}>{scanError}</p>
+            </div>
+          )}
+
+          {/* Footer */}
+          {!camError && (
+            <div style={{
+              display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+              padding: '11px 20px', background: '#f8faff', borderTop: '1px solid #e8eeff',
+            }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                <ScanLine size={14} color="#335CFF" />
+                <p style={{ margin: 0, fontSize: 12, color: '#64748b' }}>
+                  Continuous scan active
+                </p>
               </div>
               <button
                 type="button"
-                onClick={() => setShowExamples((v) => !v)}
-                className="text-xs font-semibold text-brand hover:underline"
+                onClick={() => fileInputRef.current?.click()}
+                style={{
+                  display: 'inline-flex', alignItems: 'center', gap: 4,
+                  background: 'none', border: 'none', color: '#335CFF',
+                  fontSize: 12, fontWeight: 700, cursor: 'pointer', padding: 0,
+                }}
               >
-                {showExamples ? 'Hide' : 'Show'}
+                <Upload size={13} /> Upload image
               </button>
             </div>
-
-            {showExamples && (
-              <>
-                <p className="text-xs text-slate-500 mb-3">
-                  Click <b>"Simulate Scan"</b> to test immediately, or download the barcode image and upload it in the Upload tab:
-                </p>
-
-                <div className="grid gap-3 sm:grid-cols-3">
-                  {sampleProducts.map((prod) => (
-                    <div
-                      key={prod.id}
-                      className="group flex flex-col justify-between rounded-xl border border-slate-200 bg-white p-3 shadow-xs hover:border-blue-300 transition-all"
-                    >
-                      <div className="text-center">
-                        <p className="font-extrabold text-sm text-slate-800">{prod.name}</p>
-                        <p className="text-xs font-bold text-brand">₹{prod.price}</p>
-                      </div>
-
-                      <div className="my-2 flex justify-center">
-                        <ProductBarcodeSvg barcode={prod.barcode} label={prod.name} />
-                      </div>
-
-                      <button
-                        type="button"
-                        onClick={() => handleDecodedBarcode(prod.barcode)}
-                        className="mt-1 w-full rounded-lg bg-blue-50 py-1.5 text-xs font-bold text-brand hover:bg-blue-600 hover:text-white transition-colors flex items-center justify-center gap-1"
-                      >
-                        <ShoppingCart size={13} />
-                        Simulate Scan
-                      </button>
-                    </div>
-                  ))}
-                </div>
-              </>
-            )}
-          </div>
+          )}
         </div>
-
-        {/* Footer */}
-        <div className="flex items-center justify-between border-t border-slate-100 bg-slate-50 px-6 py-3.5">
-          <p className="text-xs text-slate-500 flex items-center gap-1">
-            <HelpCircle size={13} className="text-slate-400" />
-            Supports physical packaging, mobile screens, or uploaded barcode photos.
-          </p>
-          <button
-            onClick={onClose}
-            className="btn-secondary px-5 py-2 text-xs font-bold"
-          >
-            Done Scanning
-          </button>
-        </div>
-
       </div>
-    </div>
+
+      <style>{`
+        @keyframes bsm_scan {
+          0%   { top: 6px; opacity: 0.9; }
+          50%  { top: calc(100% - 8px); opacity: 0.5; }
+          100% { top: 6px; opacity: 0.9; }
+        }
+        @keyframes bsm_pulse {
+          0%, 100% { transform: scale(1); opacity: 1; }
+          50%      { transform: scale(1.35); opacity: 0.45; }
+        }
+        @keyframes bsm_spin { to { transform: rotate(360deg); } }
+      `}</style>
+    </>
   );
 }

@@ -1,6 +1,8 @@
+import { useEffect } from 'react';
 import { useDB } from '../context/DBContext.jsx';
 import { useSync } from '../context/SyncContext.jsx';
 import { useAuth } from '../context/AuthContext.jsx';
+import { isToday, parseTimestamp } from '../lib/dateUtils.js';
 import {
   CreditCard, ShoppingCart, Boxes, Activity,
   ArrowUpRight, TrendingUp,
@@ -46,9 +48,9 @@ function useSalesTrend(bills) {
     map[key] = { day: days[d.getDay()], sales: 0, txn: 0 };
   }
   for (const bill of bills) {
-    const key = new Date(bill.timestamp).toDateString();
+    const key = parseTimestamp(bill.timestamp).toDateString();
     if (map[key]) {
-      map[key].sales += bill.total || 0;
+      map[key].sales += parseFloat(bill.total || 0);
       map[key].txn   += 1;
     }
   }
@@ -61,7 +63,7 @@ function useTopProducts(bills) {
   for (const bill of bills) {
     for (const item of (bill.items || [])) {
       if (!map[item.name]) map[item.name] = 0;
-      map[item.name] += (item.price * item.qty);
+      map[item.name] += ((parseFloat(item.price) || 0) * (parseInt(item.qty, 10) || 1));
     }
   }
   return Object.entries(map)
@@ -71,14 +73,27 @@ function useTopProducts(bills) {
 }
 
 export default function Dashboard() {
-  const { bills, lowStockProducts, loading } = useDB();
+  const { bills, lowStockProducts, loading, refresh } = useDB();
   const { pendingCount } = useSync();
   const { currentUser } = useAuth();
 
-  // Today's stats
-  const todayStart = new Date(); todayStart.setHours(0, 0, 0, 0);
-  const todayBills = bills.filter((b) => new Date(b.timestamp) >= todayStart);
-  const todayRevenue = todayBills.reduce((s, b) => s + (b.total || 0), 0);
+  // Re-fetch fresh data on mount and whenever the window gains focus
+  useEffect(() => {
+    refresh();
+    const onFocus = () => refresh();
+    window.addEventListener('focus', onFocus);
+    return () => window.removeEventListener('focus', onFocus);
+  }, [refresh]);
+
+  // Today's stats:
+  // MUST sum all of today's bills, including both PENDING_SYNC and SYNCED!
+  // Exclude only cancelled or voided transactions.
+  const todayBills = bills.filter((b) => {
+    if (!isToday(b.timestamp)) return false;
+    const s = (b.status || '').toLowerCase();
+    return s !== 'cancelled' && s !== 'void';
+  });
+  const todayRevenue = todayBills.reduce((s, b) => s + parseFloat(b.total || 0), 0);
 
   const trendData = useSalesTrend(bills);
   const topProducts = useTopProducts(bills);

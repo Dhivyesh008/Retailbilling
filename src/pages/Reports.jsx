@@ -1,9 +1,13 @@
+import { useState, useMemo } from 'react';
 import { useDB } from '../context/DBContext.jsx';
+import { useAuth } from '../context/AuthContext.jsx';
+import { parseTimestamp } from '../lib/dateUtils.js';
+import { computePredictiveStockAlerts } from '../lib/stockPrediction.js';
 import {
   AreaChart, Area, BarChart, Bar, PieChart, Pie, Cell,
   XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer,
 } from 'recharts';
-import { TrendingUp, BarChart3, PieChart as PieIcon } from 'lucide-react';
+import { TrendingUp, BarChart3, PieChart as PieIcon, AlertTriangle, CheckCircle2 } from 'lucide-react';
 
 const COLORS = ['#335CFF', '#60A5FA', '#34D399', '#FBBF24', '#F87171'];
 
@@ -18,9 +22,9 @@ function useSalesTrend(bills) {
     map[key] = { date: `${d.getDate()}/${d.getMonth()+1}`, day: days[d.getDay()], revenue: 0, orders: 0 };
   }
   for (const bill of bills) {
-    const key = new Date(bill.timestamp).toDateString();
+    const key = parseTimestamp(bill.timestamp).toDateString();
     if (map[key]) {
-      map[key].revenue += bill.total || 0;
+      map[key].revenue += parseFloat(bill.total || 0);
       map[key].orders  += 1;
     }
   }
@@ -64,7 +68,31 @@ function SummaryCard({ label, value, sub }) {
 }
 
 export default function Reports() {
-  const { bills, loading } = useDB();
+  const { bills, products, stores, loading } = useDB();
+  const { currentUser, currentBranch, isAdmin } = useAuth();
+
+  // Admin viewing "All Branches" if no specific branch was selected at login
+  const isAllBranches = isAdmin && !currentBranch;
+  const [selectedBranch, setSelectedBranch] = useState(
+    currentBranch?.id ? String(currentBranch.id) : 'ALL'
+  );
+
+  const activeBranchId = isAllBranches
+    ? (selectedBranch === 'ALL' ? null : selectedBranch)
+    : (currentBranch?.id ? String(currentBranch.id) : null);
+
+  // Show branch tag if in All Branches view and looking across all branches
+  const showBranchTag = isAllBranches && selectedBranch === 'ALL';
+
+  // Live computation of predictive low-stock alerts
+  const stockAlerts = useMemo(() => {
+    return computePredictiveStockAlerts({
+      products: products || [],
+      bills: bills || [],
+      stores: stores || [],
+      branchId: activeBranchId,
+    });
+  }, [products, bills, stores, activeBranchId]);
 
   const totalRevenue = bills.reduce((s, b) => s + (b.total || 0), 0);
   const totalOrders  = bills.length;
@@ -148,6 +176,111 @@ export default function Reports() {
           )}
         </section>
       </div>
+
+      {/* Predictive Low-Stock Alerts */}
+      <section className="card p-6 mb-5">
+        <div className="flex flex-wrap items-center justify-between gap-3 mb-4">
+          <div>
+            <p className="eyebrow">Inventory Forecast</p>
+            <div className="flex items-center gap-2 mt-0.5">
+              <h2 className="font-bold text-base">Predictive Low-Stock Alerts</h2>
+              {stockAlerts.length > 0 && (
+                <span className="rounded-full bg-red-100 px-2.5 py-0.5 text-xs font-bold text-red-700">
+                  {stockAlerts.length}
+                </span>
+              )}
+            </div>
+          </div>
+
+          <div className="flex items-center gap-2">
+            {isAllBranches && stores && stores.length > 1 && (
+              <select
+                value={selectedBranch}
+                onChange={(e) => setSelectedBranch(e.target.value)}
+                className="rounded-xl border border-slate-200 bg-white px-3 py-1.5 text-xs font-medium text-slate-700 shadow-sm outline-none focus:border-brand"
+              >
+                <option value="ALL">All Branches</option>
+                {stores.map((s) => (
+                  <option key={s.id} value={String(s.id)}>
+                    {s.name}
+                  </option>
+                ))}
+              </select>
+            )}
+            <span className="rounded-xl border border-amber-200 bg-amber-50 p-2 text-amber-600">
+              <AlertTriangle size={18} />
+            </span>
+          </div>
+        </div>
+
+        {stockAlerts.length === 0 ? (
+          <div className="flex h-36 flex-col items-center justify-center text-sm text-slate-400">
+            <CheckCircle2 size={24} className="mb-2 text-emerald-500 opacity-80" />
+            <p className="font-medium text-slate-500">No products at risk of running out soon</p>
+            <p className="mt-0.5 text-xs text-slate-400">All fast-moving items have sufficient inventory based on recent sales.</p>
+          </div>
+        ) : (
+          <div className="divide-y divide-slate-100">
+            {stockAlerts.map((item) => {
+              const urgencyClasses =
+                item.urgency === 'red'
+                  ? 'border-red-200 bg-red-50 text-red-700'
+                  : item.urgency === 'orange'
+                  ? 'border-amber-200 bg-amber-50 text-amber-700'
+                  : 'border-yellow-200 bg-yellow-50 text-yellow-800';
+
+              return (
+                <div
+                  key={`${item.productId}-${item.storeId}`}
+                  className="flex flex-wrap items-center justify-between gap-3 py-3.5 first:pt-1 last:pb-1"
+                >
+                  <div className="min-w-0">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="font-semibold text-slate-800">
+                        {item.productName}
+                      </span>
+                      {showBranchTag && (
+                        <span className="rounded-md border border-slate-200 bg-slate-100 px-2 py-0.5 text-[11px] font-medium text-slate-600">
+                          {item.storeName}
+                        </span>
+                      )}
+                    </div>
+                    <div className="mt-1 flex flex-wrap items-center gap-2 text-xs text-slate-500">
+                      <span>
+                        Current stock: <strong className="font-semibold text-slate-700">{item.currentStock} units</strong>
+                      </span>
+                      <span>·</span>
+                      <span>
+                        Avg daily rate: <strong className="font-semibold text-slate-700">{item.formattedRate} / day</strong>
+                      </span>
+                      <span>·</span>
+                      <span className="text-slate-400">
+                        ({item.totalQtySold} sold in last 7d)
+                      </span>
+                    </div>
+                  </div>
+
+                  <div className="flex items-center gap-3">
+                    <div className="text-right">
+                      <span className="text-sm font-extrabold text-slate-700">
+                        ~{item.daysRemaining} {item.daysRemaining === 1 ? 'day' : 'days'} left
+                      </span>
+                    </div>
+                    <span
+                      className={`inline-flex items-center gap-1.5 rounded-full border px-3 py-1 text-xs font-bold ${urgencyClasses}`}
+                    >
+                      {item.urgency === 'red' && (
+                        <span className="h-1.5 w-1.5 rounded-full bg-red-600 animate-pulse" />
+                      )}
+                      {item.urgencyLabel}
+                    </span>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </section>
 
       {/* Top products bar */}
       <section className="card p-6">

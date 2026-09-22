@@ -1,100 +1,248 @@
 /**
  * DBContext.jsx
  *
- * Global data provider — backed by Supabase with full offline IndexedDB caching.
- * All pages consume this context via useDB() and see the same live data,
- * whether online or completely disconnected.
+ * Global data provider powered by Dexie.js liveQuery and Supabase.
+ * Components consuming useDB() receive live, auto-updating reactive queries:
+ * Any write anywhere in the app immediately triggers re-renders across all screens.
  */
-import { createContext, useContext, useState, useCallback, useEffect } from 'react';
+import { createContext, useContext, useState, useCallback, useEffect, useMemo } from 'react';
+import { useLiveQuery } from 'dexie-react-hooks';
+import {
+  db,
+  billsDB,
+  promotionsDB,
+  pricingRulesDB,
+  priceRecommendationsDB,
+  loyaltyTiersDB,
+  storesDB,
+} from '../db/db.js';
 import {
   fetchProducts,
+  fetchSales,
   fetchReturns,
+  fetchPromotions,
+  fetchStores,
 } from '../services/supabaseService.js';
 import { loadCustomers } from '../services/customerService.js';
-import { loadAllBills } from '../services/billingService.js';
-import { loadPromotions } from '../services/promotionService.js';
-import { loyaltyTiersDB, productsDB } from '../db/db.js';
+import { parseTimestamp } from '../lib/dateUtils.js';
 
 const DBContext = createContext(null);
 
 export function DBProvider({ children }) {
-  const [products,     setProducts]     = useState([]);
-  const [customers,    setCustomers]    = useState([]);
-  const [promotions,   setPromotions]   = useState([]);
-  const [bills,        setBills]        = useState([]);
-  const [returns,      setReturns]      = useState([]);
-  const [loyaltyTiers, setLoyaltyTiers] = useState([]);
-  const [loading,      setLoading]      = useState(true);
-  const [error,        setError]        = useState(null);
+  const [supabaseProducts, setSupabaseProducts] = useState([]);
+  const [customers, setCustomers] = useState([]);
+  const [returns, setReturns] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
 
+  // ─── Dexie live queries (auto-reacts to any write across the app) ─────────
+  const livePricingRules = useLiveQuery(
+    () => db.pricingRules.toArray(),
+    [],
+    []
+  );
+
+  const livePriceRecommendations = useLiveQuery(
+    () => db.priceRecommendations.toArray(),
+    [],
+    []
+  );
+
+  const livePromotions = useLiveQuery(
+    () => db.promotions.toArray(),
+    [],
+    []
+  );
+
+  const liveBills = useLiveQuery(
+    () =>
+      db.bills.toArray().then((arr) =>
+        arr.sort((a, b) => parseTimestamp(b.timestamp).getTime() - parseTimestamp(a.timestamp).getTime())
+      ),
+    [],
+    []
+  );
+
+  const liveLoyaltyTiers = useLiveQuery(
+    () =>
+      db.loyaltyTiers.toArray().then((arr) =>
+        arr.sort((a, b) => b.minVisits - a.minVisits)
+      ),
+    [],
+    []
+  );
+
+  const liveStores = useLiveQuery(
+    () => db.stores.toArray(),
+    [],
+    []
+  );
+
+  const liveProducts = useLiveQuery(
+    () => db.products.toArray(),
+    [],
+    []
+  );
+
+  // Products: Use Supabase fetched list if available, or fall back to Dexie cached products
+  const products = supabaseProducts.length > 0 ? supabaseProducts : (liveProducts ?? []);
+
+  // Bills, promotions, pricingRules, priceRecommendations, loyaltyTiers, stores:
+  const pricingRules = livePricingRules ?? [];
+  const priceRecommendations = livePriceRecommendations ?? [];
+  const promotions = livePromotions ?? [];
+  const loyaltyTiers = liveLoyaltyTiers ?? [];
+  const stores = liveStores ?? [];
+  const bills = liveBills ?? [];
+
+  // ─── Derived filtered views ──────────────────────────────────────────────
+  const lowStockProducts = useMemo(() => {
+    return products.filter((p) => p.stock <= 10);
+  }, [products]);
+
+  const activePromotions = useMemo(() => {
+    return promotions.filter((p) => Boolean(p.active));
+  }, [promotions]);
+
+  const activeLoyaltyTiers = useMemo(() => {
+    return loyaltyTiers.filter((t) => Boolean(t.active));
+  }, [loyaltyTiers]);
+
+  // Approved recommendations (for Billing badges)
+  const approvedRecommendations = useMemo(() => {
+    return priceRecommendations.filter(
+      (r) => r.status === 'APPROVED' && !r.isInformational
+    );
+  }, [priceRecommendations]);
+
+  /**
+   * Map of productId (string) → { actionType, actionValue, actionLabel, sourceName }
+   * Used by Billing page to show badge on product cards.
+   * A product only gets one badge — the first approved recommendation found.
+   */
+  const productRecommendationMap = useMemo(() => {
+    const map = new Map();
+    for (const rec of approvedRecommendations) {
+      for (const pid of (rec.productIds || [])) {
+        if (!map.has(String(pid))) {
+          map.set(String(pid), {
+            actionType:       rec.actionType,
+            actionValue:      rec.actionValue,
+            actionLabel:      rec.actionLabel,
+            sourceName:       rec.sourceRuleName,
+            branchId:         rec.branchId ?? null,
+            recommendationId: rec.id,
+          });
+        }
+      }
+    }
+    return map;
+  }, [approvedRecommendations]);
+
+  // ─── Supabase / Network Refresh & Sync ────────────────────────────────────
   const refresh = useCallback(async () => {
     try {
       setError(null);
 
-      // 1. Fetch products with offline fallback
-      const prodsPromise = fetchProducts()
-        .then(async (fetched) => {
-          // Cache in IndexedDB for offline availability
-          for (const p of fetched) {
-            await productsDB.put(p).catch(() => {});
-          }
-          return fetched;
-        })
-        .catch(async (err) => {
-          console.warn('[DBContext] Supabase fetchProducts failed, loading from local IndexedDB:', err);
-          const cached = await productsDB.getAll().catch(() => []);
-          return cached;
-        });
-
-      // 2. Fetch bills/sales combining Supabase and offline IndexedDB bills
-      const billsPromise = loadAllBills().catch(() => []);
-
-      // 3. Fetch customers with hybrid Supabase + IndexedDB support
-      const custsPromise = loadCustomers().catch(() => []);
-
-      // 4. Fetch returns, promotions, loyalty tiers
-      const retsPromise   = fetchReturns().catch(() => []);
-      const promosPromise = loadPromotions().catch(() => []);
-      const tiersPromise  = loyaltyTiersDB.getAll().catch(() => []);
-
-      const [prods, custs, allBills, rets, promos, tiers] = await Promise.all([
-        prodsPromise,
-        custsPromise,
-        billsPromise,
-        retsPromise,
-        promosPromise,
-        tiersPromise,
+      // Parallel fetch from Supabase + customer service
+      const [prods, custs, sales, rets, promos, storeList] = await Promise.all([
+        fetchProducts().catch((err) => {
+          console.warn('[DBContext] fetchProducts fallback:', err.message);
+          return [];
+        }),
+        loadCustomers().catch(() => []),
+        fetchSales().catch(() => []),
+        fetchReturns().catch(() => []),
+        fetchPromotions().catch(() => []),
+        fetchStores().catch(() => []),
       ]);
 
-      setProducts(prods);
+      if (prods && prods.length > 0) {
+        setSupabaseProducts(prods);
+        await db.products.bulkPut(prods).catch(() => {});
+      }
       setCustomers(custs);
-      setBills(allBills.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp)));
       setReturns(rets);
-      setPromotions(promos);
-      setLoyaltyTiers(tiers.sort((a, b) => b.minVisits - a.minVisits));
+
+      if (sales && sales.length > 0) {
+        await db.bills.bulkPut(sales).catch(() => {});
+      }
+
+      if (promos && promos.length > 0) {
+        for (const sp of promos) {
+          const existing = await db.promotions.get(sp.id);
+          // Don't overwrite locally managed or rule-based promotions unless it's a remote update
+          if (!existing) {
+            await db.promotions.put(sp).catch(() => {});
+          } else if (!existing.isRuleBased && !existing.sourceRecommendationId) {
+            await db.promotions.put(sp).catch(() => {});
+          }
+        }
+      }
+
+      if (storeList && storeList.length > 0) {
+        await db.stores.bulkPut(storeList).catch(() => {});
+      }
     } catch (err) {
-      console.error('[DBContext] Failed to load data:', err);
+      console.error('[DBContext] Failed to load data from Supabase:', err);
       setError(err.message ?? 'Failed to connect to database');
     } finally {
       setLoading(false);
     }
   }, []);
 
-  // Load on mount
-  useEffect(() => { refresh(); }, [refresh]);
+  /**
+   * refreshPricingData: Retained for backwards compatibility,
+   * Dexie useLiveQuery automatically updates on any pricing table write.
+   */
+  const refreshPricingData = useCallback(async () => {
+    // Dexie automatically updates via useLiveQuery
+  }, []);
 
-  // Derived / filtered views
-  const lowStockProducts   = products.filter((p) => p.stock <= 10);
-  const activePromotions   = promotions.filter((p) => p.active);
-  const activeLoyaltyTiers = loyaltyTiers.filter((t) => t.active);
+  /**
+   * addBill: Writes directly to Dexie, which immediately triggers live query updates
+   */
+  const addBill = useCallback(async (newBill) => {
+    if (!newBill) return;
+    try {
+      await billsDB.put(newBill);
+    } catch (err) {
+      console.error('[DBContext] addBill failed:', err);
+    }
+  }, []);
+
+  // Initial load
+  useEffect(() => {
+    refresh();
+  }, [refresh]);
 
   return (
-    <DBContext.Provider value={{
-      products, customers, promotions, activePromotions,
-      bills, returns, loyaltyTiers, activeLoyaltyTiers,
-      loading, error, refresh, lowStockProducts,
-      stock: Object.fromEntries(products.map((p) => [p.id, p.stock])),
-    }}>
+    <DBContext.Provider
+      value={{
+        products,
+        customers,
+        promotions,
+        activePromotions,
+        bills,
+        returns,
+        loyaltyTiers,
+        activeLoyaltyTiers,
+        stores,
+        loading,
+        error,
+        refresh,
+        addBill,
+        lowStockProducts,
+        // Pricing engine
+        pricingRules,
+        priceRecommendations,
+        approvedRecommendations,
+        productRecommendationMap,
+        refreshPricingData,
+        // Legacy: stock map (product id → quantity)
+        stock: Object.fromEntries(products.map((p) => [p.id, p.stock])),
+      }}
+    >
       {children}
     </DBContext.Provider>
   );

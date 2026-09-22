@@ -1,0 +1,189 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>RetailSync — Barcode Demo Sheet</title>
+  <script src="https://cdn.jsdelivr.net/npm/jsbarcode@3.11.6/dist/JsBarcode.all.min.js"></script>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: 'Segoe UI', Arial, sans-serif;
+      background: #f0f4ff;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 32px 16px;
+      min-height: 100vh;
+    }
+
+    .header {
+      background: linear-gradient(135deg, #335CFF, #4f7bff);
+      color: white;
+      border-radius: 16px;
+      padding: 18px 36px;
+      margin-bottom: 28px;
+      text-align: center;
+      box-shadow: 0 8px 24px #335cff40;
+    }
+    .header h1 { font-size: 22px; font-weight: 800; letter-spacing: -0.5px; }
+    .header p  { font-size: 13px; opacity: 0.85; margin-top: 4px; }
+
+    .cards {
+      display: flex;
+      flex-direction: column;
+      gap: 20px;
+      width: 100%;
+      max-width: 540px;
+    }
+
+    .card {
+      background: white;
+      border-radius: 16px;
+      padding: 24px;
+      box-shadow: 0 4px 20px rgba(0,0,0,0.08);
+      display: flex;
+      align-items: center;
+      gap: 24px;
+    }
+
+    .card-barcode { flex-shrink: 0; }
+    .card-barcode svg { display: block; }
+
+    .card-info { flex: 1; }
+    .card-info .product { font-size: 20px; font-weight: 800; color: #1e293b; }
+    .card-info .sku     { font-size: 13px; color: #64748b; margin-top: 2px; }
+    .card-info .num     {
+      margin-top: 10px;
+      font-family: 'Courier New', monospace;
+      font-size: 15px;
+      font-weight: 700;
+      color: #335CFF;
+      letter-spacing: 2px;
+      background: #eef2ff;
+      padding: 4px 10px;
+      border-radius: 6px;
+      display: inline-block;
+    }
+
+    .badge {
+      display: inline-block;
+      background: #dcfce7;
+      color: #16a34a;
+      font-size: 11px;
+      font-weight: 700;
+      padding: 2px 8px;
+      border-radius: 20px;
+      margin-top: 6px;
+    }
+
+    .note {
+      margin-top: 24px;
+      max-width: 540px;
+      background: #fffbeb;
+      border: 1px solid #fde68a;
+      border-radius: 12px;
+      padding: 14px 18px;
+      font-size: 13px;
+      color: #92400e;
+      line-height: 1.6;
+    }
+    .note strong { font-weight: 800; }
+
+    .print-btn {
+      margin-top: 20px;
+      padding: 12px 32px;
+      background: #335CFF;
+      color: white;
+      border: none;
+      border-radius: 10px;
+      font-size: 15px;
+      font-weight: 700;
+      cursor: pointer;
+      box-shadow: 0 4px 14px #335cff40;
+      transition: opacity 0.15s;
+    }
+    .print-btn:hover { opacity: 0.88; }
+
+    @media print {
+      body { background: white; padding: 12px; }
+      .header { box-shadow: none; }
+      .card   { box-shadow: none; border: 1px solid #e2e8f0; }
+      .print-btn, .note { display: none; }
+    }
+  </style>
+</head>
+<body>
+
+  <div class="header">
+    <h1>📦 RetailSync — Barcode Demo Sheet</h1>
+    <p>Open this page on a second screen and scan with the Billing camera</p>
+  </div>
+
+  <div class="cards">
+
+    <div class="card">
+      <div class="card-barcode">
+        <svg id="bc1"></svg>
+      </div>
+      <div class="card-info">
+        <div class="product">🥛 Milk</div>
+        <div class="sku">SKU001 · Dairy</div>
+        <div class="num">8901030826825</div>
+        <div class="badge">✓ Valid EAN-13</div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-barcode">
+        <svg id="bc2"></svg>
+      </div>
+      <div class="card-info">
+        <div class="product">🍞 Bread</div>
+        <div class="sku">SKU002 · Bakery</div>
+        <div class="num">8901030826832</div>
+        <div class="badge">✓ Valid EAN-13</div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-barcode">
+        <svg id="bc3"></svg>
+      </div>
+      <div class="card-info">
+        <div class="product">🌾 Rice 5kg</div>
+        <div class="sku">SKU003 · Grocery</div>
+        <div class="num">8901030826849</div>
+        <div class="badge">✓ Valid EAN-13</div>
+      </div>
+    </div>
+
+  </div>
+
+  <div class="note">
+    <strong>⚠ Before scanning:</strong> Run the updated SQL in Supabase SQL Editor to assign
+    these barcodes to your products. The old barcodes (ending in …829/830/831) had wrong
+    checksums — replace them with the values shown above (ending in …825/832/849).
+  </div>
+
+  <button class="print-btn" onclick="window.print()">🖨 Print this sheet</button>
+
+  <script>
+    const opts = {
+      format:       'EAN13',
+      width:        2.4,
+      height:       85,
+      displayValue: false,
+      background:   '#ffffff',
+      lineColor:    '#000000',
+      margin:       16,
+    };
+
+    JsBarcode('#bc1', '8901030826825', opts);
+    JsBarcode('#bc2', '8901030826832', opts);
+    JsBarcode('#bc3', '8901030826849', opts);
+  </script>
+
+</body>
+</html>
