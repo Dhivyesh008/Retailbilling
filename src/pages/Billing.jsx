@@ -1,7 +1,7 @@
 import { useState, useCallback, useEffect, useRef } from 'react';
 import {
   Phone, User, Search, ShoppingCart, Trash2,
-  ReceiptText, Tag, Plus, Minus, Star, CheckCircle, WifiOff,
+  ReceiptText, Tag, Plus, Minus, Star, CheckCircle, WifiOff, Camera,
 } from 'lucide-react';
 import { useDB }   from '../context/DBContext.jsx';
 import { useSync } from '../context/SyncContext.jsx';
@@ -10,6 +10,7 @@ import { findCustomerByPhone, saveCustomer } from '../services/customerService.j
 import { processSale } from '../services/billingService.js';
 import { calcLoyaltyDiscount } from '../constants/loyalty.js';
 import InvoiceModal from '../components/InvoiceModal.jsx';
+import BarcodeScannerModal from '../components/BarcodeScannerModal.jsx';
 
 // ─── Promo helper ─────────────────────────────────────────────────────────────
 function applyPromotion(subtotal, promo, cart = []) {
@@ -99,8 +100,9 @@ export default function Billing() {
   });
 
   // ── output ───────────────────────────────────────────────────────────────
-  const [invoice, setInvoice] = useState(null);
-  const [saving, setSaving]   = useState(false);
+  const [invoice, setInvoice]         = useState(null);
+  const [saving, setSaving]           = useState(false);
+  const [scannerOpen, setScannerOpen] = useState(false);
 
   // ── Debounced phone lookup ────────────────────────────────────────────────
   useEffect(() => {
@@ -287,14 +289,34 @@ export default function Billing() {
 
           {/* Step 2 — Products */}
           <section className="card p-5">
-            <h2 className="mb-4 font-bold text-slate-700">
-              <span className="mr-2 inline-flex h-6 w-6 items-center justify-center rounded-full bg-brand text-xs text-white font-extrabold">2</span>
-              Products
-            </h2>
-            <div className="relative mb-3">
-              <Search size={17} className="absolute left-3 top-2.5 text-slate-400" />
-              <input className="field pl-9" placeholder="Search by name, SKU or category…"
-                value={q} onChange={(e) => setQ(e.target.value)} />
+            <div className="mb-4 flex items-center justify-between flex-wrap gap-2">
+              <h2 className="font-bold text-slate-700 flex items-center">
+                <span className="mr-2 inline-flex h-6 w-6 items-center justify-center rounded-full bg-brand text-xs text-white font-extrabold">2</span>
+                Products
+              </h2>
+              <button
+                type="button"
+                onClick={() => setScannerOpen(true)}
+                className="btn-primary text-xs px-3.5 py-1.5 flex items-center gap-1.5 shadow-xs"
+              >
+                <Camera size={14} /> Scan Barcode (Camera)
+              </button>
+            </div>
+            <div className="relative mb-3 flex gap-2">
+              <div className="relative flex-1">
+                <Search size={17} className="absolute left-3 top-2.5 text-slate-400" />
+                <input className="field pl-9" placeholder="Search by name, SKU or category…"
+                  value={q} onChange={(e) => setQ(e.target.value)} />
+              </div>
+              <button
+                type="button"
+                onClick={() => setScannerOpen(true)}
+                title="Scan barcode with camera"
+                className="rounded-xl border border-slate-200 bg-slate-50 px-3 text-slate-600 hover:border-brand hover:bg-blue-50 hover:text-brand transition flex items-center gap-1 text-xs font-bold"
+              >
+                <Camera size={14} className="text-brand" />
+                <span className="hidden sm:inline">Camera</span>
+              </button>
             </div>
             <div className="grid gap-2 sm:grid-cols-2 max-h-72 overflow-y-auto pr-1">
               {filtered.map((p) => (
@@ -420,6 +442,15 @@ export default function Billing() {
           </section>
         </div>
       </div>
+
+      {scannerOpen && (
+        <BarcodeScannerModal
+          isOpen={scannerOpen}
+          onClose={() => setScannerOpen(false)}
+          products={products}
+          onProductScanned={(product) => addToCart(product)}
+        />
+      )}
 
       {invoice && <InvoiceModal invoice={invoice} onClose={() => setInvoice(null)} />}
     </>
