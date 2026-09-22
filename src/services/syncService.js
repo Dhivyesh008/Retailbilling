@@ -1,6 +1,7 @@
-import { syncQueueDB, customersDB } from '../db/db.js';
+import { syncQueueDB, customersDB, billsDB } from '../db/db.js';
 import { supabase } from '../lib/supabase.js';
 import { mapCustomer, syncOfflineCustomers } from './customerService.js';
+import { syncOfflineBills } from './billingService.js';
 
 /**
  * Pushes a single sync queue entry to the Supabase database.
@@ -54,14 +55,17 @@ async function pushToServer(entry) {
 /**
  * Iterates all PENDING_SYNC entries in the syncQueue store,
  * calls pushToServer() for each, then marks them SYNCED.
- * Also runs syncOfflineCustomers() to ensure all pending local data is flushed.
+ * Also runs syncOfflineCustomers() and syncOfflineBills() to flush all pending local data.
  *
  * @param {Function} [onProgress] - Optional callback(processed, total)
  * @returns {Promise<{processed: number, failed: number}>}
  */
 export async function runSyncQueue(onProgress) {
-  // First run customer sync directly to cover any unqueued pending customers
+  // 1. Sync pending offline customers first (so bills can link to synced customer IDs)
   await syncOfflineCustomers();
+
+  // 2. Sync pending offline bills/sales to Supabase
+  await syncOfflineBills();
 
   const pending = await syncQueueDB.getPending();
   let processed = 0;

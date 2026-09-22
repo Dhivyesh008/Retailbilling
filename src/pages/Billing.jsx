@@ -1,17 +1,13 @@
 import { useState, useCallback, useEffect, useRef } from 'react';
 import {
   Phone, User, Search, ShoppingCart, Trash2,
-  ReceiptText, Tag, Plus, Minus, Star, CheckCircle,
+  ReceiptText, Tag, Plus, Minus, Star, CheckCircle, WifiOff,
 } from 'lucide-react';
 import { useDB }   from '../context/DBContext.jsx';
 import { useSync } from '../context/SyncContext.jsx';
 import { useAuth } from '../context/AuthContext.jsx';
-import {
-  incrementLoyaltyPoints,
-  insertSale,
-  adjustProductStock,
-} from '../services/supabaseService.js';
 import { findCustomerByPhone, saveCustomer } from '../services/customerService.js';
+import { processSale } from '../services/billingService.js';
 import { calcLoyaltyDiscount } from '../constants/loyalty.js';
 import InvoiceModal from '../components/InvoiceModal.jsx';
 
@@ -148,75 +144,28 @@ export default function Billing() {
 
       // 2. Generate invoice number
       const invoiceNumber = `INV-${Date.now()}`;
-      const totalDiscount = promoDiscount + loyaltyDiscount;
 
-      // 3. Insert sale + items into Supabase
-      // Sanitize IDs — Supabase uses bigint; old sessions may have string IDs like "store-a"
-      const toNumericId = (v) => {
-        const n = parseInt(v, 10);
-        return isNaN(n) ? null : n;
-      };
-
-      const saleId = await insertSale({
+      // 3. Process sale (saves to Supabase if online, or IndexedDB + syncQueue if offline)
+      const { bill } = await processSale({
         invoiceNumber,
-        customerId:    resolvedCustomer.id,
-        cashierId:     toNumericId(currentUser?.id),
-        storeId:       toNumericId(currentUser?.storeId),
-        subtotal,
-        discount:      totalDiscount,
-        tax:           0,
-        total,
-        paymentMethod: payment,
-        status:        'completed',
-        syncStatus:    isOnline ? 'synced' : 'pending',
-        items: cart.map((i) => ({
-          productId: i.product.id,
-          name:      i.product.name,
-          price:     i.product.price,
-          qty:       i.qty,
-          category:  i.product.category,
-        })),
-      });
-
-      // 4. Reduce stock in Supabase for each item
-      await Promise.all(
-        cart.map((i) => adjustProductStock(i.product.id, -i.qty))
-      );
-
-      // 5. Increment loyalty points (+1 visit) in Supabase
-      await incrementLoyaltyPoints(resolvedCustomer.id, 1);
-
-      // 6. Build local invoice object for the receipt modal
-      const bill = {
-        id:            String(saleId),
-        invoiceNumber,
-        items: cart.map((i) => ({
-          productId: i.product.id,
-          name:      i.product.name,
-          price:     i.product.price,
-          qty:       i.qty,
-          category:  i.product.category,
-        })),
+        customer: resolvedCustomer,
+        currentUser,
+        cart,
         subtotal,
         promoDiscount,
         loyaltyDiscount,
-        discount:      totalDiscount,
         total,
         payment,
-        customerPhone: phone.trim(),
-        customerName:  customerName.trim() || resolvedCustomer.name || '',
-        customerId:    resolvedCustomer.id,
-        cashierId:     currentUser?.id,
-        promoId:       promo?.id ?? null,
+        promo,
+        tier,
         visitsAfter,
-        loyaltyTierId: tier?.id ?? null,
-        timestamp:     new Date().toISOString(),
-        status:        isOnline ? 'SYNCED' : 'PENDING_SYNC',
-      };
+        isOnline,
+      });
 
-      // 7. Refresh context so dashboard / inventory updates
+      // 4. Refresh context so dashboard / inventory updates immediately
       await refresh();
 
+      // 5. Open invoice modal
       setInvoice({
         bill, cart, subtotal, promoDiscount, loyaltyDiscount, total, payment,
         promo, tier, visitsAfter,
@@ -224,19 +173,19 @@ export default function Billing() {
         customerName:  customerName.trim() || resolvedCustomer.name || '',
       });
 
+      // Reset state for next sale
       setCart([]); setSelectedPromo(''); setPhone('');
       setCustomerName(''); setCustomer(null);
     } catch (err) {
       console.error('[Billing] completeSale failed:', err);
-      alert(`Sale could not be saved: ${err.message}`);
+      alert('Failed to complete sale: ' + (err.message || 'Unknown error'));
     } finally {
       setSaving(false);
     }
   }, [
     cart, phone, customerName, customer, saving, isOnline,
     subtotal, promoDiscount, loyaltyDiscount, total, payment,
-    currentUser, promo, tier, visitsAfter,
-    refresh, refreshPendingCount,
+    promo, tier, visitsAfter, currentUser, refresh, refreshPendingCount,
   ]);
 
   const canComplete = cart.length > 0 && phone.trim().length >= 10 && !saving;
@@ -249,6 +198,21 @@ export default function Billing() {
         <h1 className="mt-1 text-2xl font-extrabold">Billing</h1>
         <p className="text-sm text-slate-500">Identify the customer, build the cart, then complete the sale.</p>
       </div>
+
+      {/* Offline Mode Banner */}
+      {!isOnline && (
+        <div className="mb-5 flex items-center gap-3 rounded-2xl border border-amber-200 bg-amber-50/90 p-4 shadow-sm">
+          <div className="grid h-9 w-9 shrink-0 place-items-center rounded-xl bg-amber-100 text-amber-700">
+            <WifiOff size={18} />
+          </div>
+          <div>
+            <p className="text-sm font-bold text-amber-800">Billing in Offline Mode</p>
+            <p className="text-xs text-amber-700/90">
+              No internet connection. Invoices and stock adjustments are saved to local <b>IndexedDB</b> and will automatically sync to Supabase once connected.
+            </p>
+          </div>
+        </div>
+      )}
 
       <div className="grid gap-5 lg:grid-cols-[1.4fr_1fr]">
 

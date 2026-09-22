@@ -1,21 +1,19 @@
 /**
  * DBContext.jsx
  *
- * Global data provider — now backed by Supabase.
- * All pages consume this context via useDB() and see the same live data.
+ * Global data provider — backed by Supabase with full offline IndexedDB caching.
+ * All pages consume this context via useDB() and see the same live data,
+ * whether online or completely disconnected.
  */
 import { createContext, useContext, useState, useCallback, useEffect } from 'react';
 import {
   fetchProducts,
-  fetchSales,
   fetchReturns,
   fetchPromotions,
 } from '../services/supabaseService.js';
 import { loadCustomers } from '../services/customerService.js';
-
-// Loyalty tiers are still stored locally (not in your Supabase schema).
-// Keep reading them from IndexedDB if they exist, otherwise default to [].
-import { loyaltyTiersDB } from '../db/db.js';
+import { loadAllBills } from '../services/billingService.js';
+import { loyaltyTiersDB, productsDB } from '../db/db.js';
 
 const DBContext = createContext(null);
 
@@ -33,24 +31,49 @@ export function DBProvider({ children }) {
     try {
       setError(null);
 
-      // Parallel fetch from Supabase + local IndexedDB for loyalty tiers
-      const [prods, custs, sales, rets, promos, tiers] = await Promise.all([
-        fetchProducts(),
-        loadCustomers(),
-        fetchSales(),
-        fetchReturns(),
-        fetchPromotions(),
-        loyaltyTiersDB.getAll().catch(() => []),   // graceful fallback
+      // 1. Fetch products with offline fallback
+      const prodsPromise = fetchProducts()
+        .then(async (fetched) => {
+          // Cache in IndexedDB for offline availability
+          for (const p of fetched) {
+            await productsDB.put(p).catch(() => {});
+          }
+          return fetched;
+        })
+        .catch(async (err) => {
+          console.warn('[DBContext] Supabase fetchProducts failed, loading from local IndexedDB:', err);
+          const cached = await productsDB.getAll().catch(() => []);
+          return cached;
+        });
+
+      // 2. Fetch bills/sales combining Supabase and offline IndexedDB bills
+      const billsPromise = loadAllBills().catch(() => []);
+
+      // 3. Fetch customers with hybrid Supabase + IndexedDB support
+      const custsPromise = loadCustomers().catch(() => []);
+
+      // 4. Fetch returns, promotions, loyalty tiers
+      const retsPromise   = fetchReturns().catch(() => []);
+      const promosPromise = fetchPromotions().catch(() => []);
+      const tiersPromise  = loyaltyTiersDB.getAll().catch(() => []);
+
+      const [prods, custs, allBills, rets, promos, tiers] = await Promise.all([
+        prodsPromise,
+        custsPromise,
+        billsPromise,
+        retsPromise,
+        promosPromise,
+        tiersPromise,
       ]);
 
       setProducts(prods);
       setCustomers(custs);
-      setBills(sales.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp)));
+      setBills(allBills.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp)));
       setReturns(rets);
       setPromotions(promos);
       setLoyaltyTiers(tiers.sort((a, b) => b.minVisits - a.minVisits));
     } catch (err) {
-      console.error('[DBContext] Failed to load data from Supabase:', err);
+      console.error('[DBContext] Failed to load data:', err);
       setError(err.message ?? 'Failed to connect to database');
     } finally {
       setLoading(false);
@@ -70,7 +93,6 @@ export function DBProvider({ children }) {
       products, customers, promotions, activePromotions,
       bills, returns, loyaltyTiers, activeLoyaltyTiers,
       loading, error, refresh, lowStockProducts,
-      // Legacy: stock map (product id → quantity)
       stock: Object.fromEntries(products.map((p) => [p.id, p.stock])),
     }}>
       {children}
