@@ -20,11 +20,12 @@ export async function seedIfNeeded() {
 
 async function seedStores() {
   const stores = [
-    { id: 'store-a', name: 'Branch A — Main Market', password: 'branchA@123' },
-    { id: 'store-b', name: 'Branch B — City Centre',  password: 'branchB@456' },
+    { id: 1, name: 'RetailSync Main Store', location: 'Erode', password: 'store@123' },
+    { id: 2, name: 'RetailSync Branch B', location: 'Coimbatore', password: 'store@123' },
   ];
   for (const s of stores) await storesDB.put(s);
 }
+
 
 // ─── Users ──────────────────────────────────────────────────────────────────
 

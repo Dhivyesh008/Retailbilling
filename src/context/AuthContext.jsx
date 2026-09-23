@@ -62,6 +62,18 @@ export function AuthProvider({ children }) {
    */
   const getStores = useCallback(() => fetchStores(), []);
 
+  const switchBranch = useCallback((branch) => {
+    setCurrentBranch(branch);
+    const session = loadSession();
+    if (session) {
+      session.branch = branch;
+      if (session.user) {
+        session.user.storeId = branch?.id ?? null;
+      }
+      localStorage.setItem(SESSION_KEY, JSON.stringify(session));
+    }
+  }, []);
+
   const logout = useCallback(() => {
     localStorage.removeItem(SESSION_KEY);
     setCurrentUser(null);
@@ -77,7 +89,7 @@ export function AuthProvider({ children }) {
   return (
     <AuthContext.Provider value={{
       currentUser, currentBranch,
-      loginBranch, loginAdmin, getStores, logout,
+      loginBranch, loginAdmin, getStores, logout, switchBranch,
       isAdmin, isManager, isCashier, isStaff, canManage,
     }}>
       {children}

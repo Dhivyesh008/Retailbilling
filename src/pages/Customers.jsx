@@ -1,13 +1,13 @@
 import { useState } from 'react';
 import {
-  Search, User, Phone, Mail, ShoppingBag, X, Plus,
+  Search, User, Phone, Mail, ShoppingBag, X, Plus, Pencil,
   Wifi, WifiOff, RefreshCw, CloudCheck, AlertCircle, Database
 } from 'lucide-react';
 import { useDB } from '../context/DBContext.jsx';
 import { useSync } from '../context/SyncContext.jsx';
-import { saveCustomer } from '../services/customerService.js';
+import { saveCustomer, updateCustomer } from '../services/customerService.js';
 
-function CustomerDetail({ customer, bills, onClose }) {
+function CustomerDetail({ customer, bills, onClose, onEdit }) {
   const purchasedBills = bills.filter((b) => customer.purchaseHistory?.includes(b.id));
   const isOffline = customer.syncStatus === 'PENDING_SYNC' || String(customer.id).startsWith('offline-');
 
@@ -37,9 +37,23 @@ function CustomerDetail({ customer, bills, onClose }) {
               <p className="font-mono text-xs text-slate-400">ID: {customer.id}</p>
             </div>
           </div>
-          <button onClick={onClose} className="rounded-xl border border-slate-200 p-2 text-slate-400 hover:bg-slate-50 hover:text-slate-600">
-            <X size={16} />
-          </button>
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              onClick={() => {
+                onClose();
+                onEdit(customer);
+              }}
+              className="inline-flex items-center gap-1.5 rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs font-bold text-slate-700 hover:bg-slate-50 transition shadow-sm"
+              title="Edit customer details"
+            >
+              <Pencil size={13} className="text-slate-500" />
+              <span>Edit</span>
+            </button>
+            <button onClick={onClose} className="rounded-xl border border-slate-200 p-2 text-slate-400 hover:bg-slate-50 hover:text-slate-600">
+              <X size={16} />
+            </button>
+          </div>
         </div>
 
         <div className="mt-5 grid grid-cols-2 gap-3">
@@ -47,9 +61,25 @@ function CustomerDetail({ customer, bills, onClose }) {
             <Phone size={15} className="text-slate-400 shrink-0" />
             <span className="text-sm font-bold text-slate-700">{customer.phone}</span>
           </div>
-          <div className="flex items-center gap-2 rounded-xl bg-slate-50 p-3">
-            <Mail size={15} className="text-slate-400 shrink-0" />
-            <span className="text-sm font-bold truncate text-slate-700">{customer.email || '—'}</span>
+          <div className="flex items-center justify-between rounded-xl bg-slate-50 p-3">
+            <div className="flex items-center gap-2 min-w-0">
+              <Mail size={15} className="text-slate-400 shrink-0" />
+              <span className={`text-sm font-bold truncate ${customer.email ? 'text-slate-700' : 'text-slate-400 italic'}`}>
+                {customer.email || 'No email entered'}
+              </span>
+            </div>
+            {!customer.email && (
+              <button
+                type="button"
+                onClick={() => {
+                  onClose();
+                  onEdit(customer);
+                }}
+                className="text-xs font-bold text-brand hover:underline shrink-0 ml-2"
+              >
+                + Add
+              </button>
+            )}
           </div>
         </div>
 
@@ -216,30 +246,180 @@ function AddCustomerModal({ onClose, onCreated }) {
   );
 }
 
+function EditCustomerModal({ customer, onClose, onUpdated }) {
+  const { isOnline } = useSync();
+  const [name, setName] = useState(customer.name || '');
+  const [phone, setPhone] = useState(customer.phone || '');
+  const [email, setEmail] = useState(customer.email || '');
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState('');
+
+  const handleSubmit = async (e) => {
+    e.preventDefault();
+    if (!name.trim() || !phone.trim()) {
+      setError('Please provide both customer name and phone number.');
+      return;
+    }
+
+    setSaving(true);
+    setError('');
+    try {
+      const updated = await updateCustomer(customer.id, {
+        name: name.trim(),
+        phone: phone.trim(),
+        email: email.trim(),
+      }, isOnline);
+
+      onUpdated(updated);
+      onClose();
+    } catch (err) {
+      console.error('[EditCustomerModal] Error updating customer:', err);
+      setError('Failed to update customer. Please check your connection or input.');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/40 p-4 backdrop-blur-sm animate-in fade-in duration-150">
+      <div className="card w-full max-w-md p-6 shadow-2xl animate-in zoom-in-95 duration-150">
+        <div className="flex items-center justify-between border-b border-slate-100 pb-4">
+          <div>
+            <h2 className="text-lg font-extrabold text-slate-900">Edit Customer</h2>
+            <p className="text-xs text-slate-500">
+              Update details or add an email address for {customer.name}.
+            </p>
+          </div>
+          <button onClick={onClose} className="rounded-xl border border-slate-200 p-2 text-slate-400 hover:bg-slate-50">
+            <X size={16} />
+          </button>
+        </div>
+
+        <form onSubmit={handleSubmit} className="mt-5 space-y-4">
+          {error && (
+            <div className="flex items-center gap-2 rounded-xl border border-red-200 bg-red-50 p-3 text-xs text-red-600">
+              <AlertCircle size={14} className="shrink-0" />
+              {error}
+            </div>
+          )}
+
+          <div>
+            <label className="mb-1 block text-xs font-bold uppercase tracking-wider text-slate-500">
+              Customer Name *
+            </label>
+            <input
+              type="text"
+              required
+              className="field w-full text-sm"
+              placeholder="e.g. Dhivyesh Kumar"
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+            />
+          </div>
+
+          <div>
+            <label className="mb-1 block text-xs font-bold uppercase tracking-wider text-slate-500">
+              Phone Number *
+            </label>
+            <input
+              type="tel"
+              required
+              className="field w-full text-sm"
+              placeholder="e.g. 9876543210"
+              value={phone}
+              onChange={(e) => setPhone(e.target.value)}
+            />
+          </div>
+
+          <div>
+            <div className="flex items-center justify-between mb-1">
+              <label className="block text-xs font-bold uppercase tracking-wider text-slate-500">
+                Email Address
+              </label>
+              {!customer.email && (
+                <span className="text-[11px] font-semibold text-brand">Not entered yet</span>
+              )}
+            </div>
+            <input
+              type="email"
+              className="field w-full text-sm"
+              placeholder="e.g. customer@example.com"
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+              autoFocus={!customer.email}
+            />
+            {!customer.email ? (
+              <p className="mt-1 text-[11px] text-brand font-medium">
+                💡 Enter customer's email here to save to the database.
+              </p>
+            ) : (
+              <p className="mt-1 text-[11px] text-slate-400">
+                Used for receipts, promotions, and store notifications.
+              </p>
+            )}
+          </div>
+
+          <div className="mt-2 rounded-xl bg-slate-50 p-3 text-xs text-slate-500 flex items-center gap-2">
+            {isOnline ? (
+              <>
+                <Wifi size={14} className="text-emerald-500 shrink-0" />
+                <span>Status: <b>Online</b> (Saves to Supabase PostgreSQL)</span>
+              </>
+            ) : (
+              <>
+                <WifiOff size={14} className="text-amber-500 shrink-0" />
+                <span>Status: <b>Offline</b> (Saves locally & auto-syncs)</span>
+              </>
+            )}
+          </div>
+
+          <div className="flex justify-end gap-3 pt-3">
+            <button
+              type="button"
+              onClick={onClose}
+              className="rounded-xl border border-slate-200 px-4 py-2.5 text-xs font-bold text-slate-600 hover:bg-slate-50"
+            >
+              Cancel
+            </button>
+            <button
+              type="submit"
+              disabled={saving}
+              className="btn-primary px-5 py-2.5 text-xs disabled:opacity-50"
+            >
+              {saving ? 'Saving…' : 'Save Changes'}
+            </button>
+          </div>
+        </form>
+      </div>
+    </div>
+  );
+}
+
 export default function Customers() {
   const { customers, bills, loading, refresh } = useDB();
   const { isOnline, isSyncing, runSync } = useSync();
   const [q, setQ] = useState('');
   const [selected, setSelected] = useState(null);
   const [showAddModal, setShowAddModal] = useState(false);
+  const [editingCustomer, setEditingCustomer] = useState(null);
 
   const filtered = customers.filter(
     (c) => (c.name + c.phone + (c.email || '')).toLowerCase().includes(q.toLowerCase())
   );
 
-  const totalOrders = (c) => c.purchaseHistory?.length ?? 0;
-  const totalSpend = (c) => {
-    return bills
-      .filter((b) => c.purchaseHistory?.includes(b.id))
-      .reduce((s, b) => s + (b.total || 0), 0);
-  };
-
   const pendingOfflineCount = customers.filter(
-    (c) => c.syncStatus === 'PENDING_SYNC' || String(c.id).startsWith('offline-')
+    (c) => c.syncStatus === 'PENDING_SYNC' || c.syncStatus === 'PENDING_UPDATE' || String(c.id).startsWith('offline-')
   ).length;
 
   const handleCustomerCreated = async () => {
     await refresh();
+  };
+
+  const handleCustomerUpdated = async (updated) => {
+    await refresh();
+    if (selected && selected.id === updated.id) {
+      setSelected(updated);
+    }
   };
 
   const handleManualSync = async () => {
@@ -372,17 +552,29 @@ export default function Customers() {
                   </div>
                 </div>
 
-                <div className="flex items-center gap-6 text-right">
-                  <div>
-                    <p className="text-xs text-slate-400">Orders</p>
-                    <p className="font-extrabold text-brand">{totalOrders(c)}</p>
-                  </div>
-                  <div>
-                    <p className="text-xs text-slate-400">Total Spend</p>
-                    <p className="font-extrabold text-slate-800">₹{totalSpend(c).toLocaleString('en-IN')}</p>
-                  </div>
-                  <User size={16} className="text-slate-300" />
+                <div className="flex items-center gap-2" onClick={(e) => e.stopPropagation()}>
+                  {!c.email ? (
+                    <button
+                      type="button"
+                      onClick={() => setEditingCustomer(c)}
+                      className="inline-flex items-center gap-1 rounded-xl border border-blue-200 bg-blue-50/80 px-2.5 py-1.5 text-xs font-bold text-brand hover:bg-blue-100 transition shadow-xs"
+                      title="Add email address"
+                    >
+                      <Plus size={12} />
+                      <span>Add Email</span>
+                    </button>
+                  ) : null}
+                  <button
+                    type="button"
+                    onClick={() => setEditingCustomer(c)}
+                    className="inline-flex items-center gap-1.5 rounded-xl border border-slate-200 bg-white px-3 py-1.5 text-xs font-bold text-slate-600 hover:bg-slate-50 hover:text-slate-900 transition shadow-xs"
+                    title="Edit customer details"
+                  >
+                    <Pencil size={12} />
+                    <span>Edit</span>
+                  </button>
                 </div>
+
               </div>
             );
           })}
@@ -399,7 +591,12 @@ export default function Customers() {
 
       {/* Selected Customer Detail Modal */}
       {selected && (
-        <CustomerDetail customer={selected} bills={bills} onClose={() => setSelected(null)} />
+        <CustomerDetail
+          customer={selected}
+          bills={bills}
+          onClose={() => setSelected(null)}
+          onEdit={(cust) => setEditingCustomer(cust)}
+        />
       )}
 
       {/* Add Customer Modal */}
@@ -409,6 +606,16 @@ export default function Customers() {
           onCreated={handleCustomerCreated}
         />
       )}
+
+      {/* Edit Customer Modal */}
+      {editingCustomer && (
+        <EditCustomerModal
+          customer={editingCustomer}
+          onClose={() => setEditingCustomer(null)}
+          onUpdated={handleCustomerUpdated}
+        />
+      )}
     </>
   );
 }
+

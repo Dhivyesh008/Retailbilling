@@ -157,9 +157,12 @@ export function DBProvider({ children }) {
         fetchStores().catch(() => []),
       ]);
 
-      if (prods && prods.length > 0) {
+      if (prods) {
         setSupabaseProducts(prods);
-        await db.products.bulkPut(prods).catch(() => {});
+        await db.products.clear().catch(() => {});
+        if (prods.length > 0) {
+          await db.products.bulkPut(prods).catch(() => {});
+        }
       }
       setCustomers(custs);
       setReturns(rets);

@@ -384,6 +384,31 @@ export async function fetchStores() {
 }
 
 /**
+ * Create a new store branch in Supabase and create default role users
+ */
+export async function createStore({ name, location }) {
+  const { data, error } = await supabase
+    .from('stores')
+    .insert([{ name, location }])
+    .select()
+    .single();
+  if (error) {
+    console.error('[Supabase] createStore:', error.message);
+    throw error;
+  }
+
+  // Create default users for this new branch so staff/cashier can log in
+  const storeId = data.id;
+  await supabase.from('users').insert([
+    { name: `Manager (${name})`, email: `manager.store${storeId}@retailsync.com`, password_hash: 'store@123', role: 'Manager', store_id: storeId },
+    { name: `Cashier (${name})`, email: `cashier.store${storeId}@retailsync.com`, password_hash: 'store@123', role: 'Cashier', store_id: storeId },
+    { name: `Staff (${name})`, email: `staff.store${storeId}@retailsync.com`, password_hash: 'store@123', role: 'Staff', store_id: storeId },
+  ]).catch((err) => console.warn('[createStore] Error creating default branch users:', err));
+
+  return mapStore(data);
+}
+
+/**
  * Validate a branch login by matching store id + role + password.
  * Role is required to disambiguate when multiple users share the same password.
  */

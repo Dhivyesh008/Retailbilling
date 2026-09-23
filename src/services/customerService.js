@@ -94,6 +94,63 @@ export async function saveCustomer({ name, phone, email = '', loyaltyPoints = 0 
 }
 
 /**
+ * Update an existing customer's details (e.g. email, phone, name).
+ * - If online: Updates Supabase & syncs to IndexedDB cache.
+ * - If offline: Updates IndexedDB with PENDING_UPDATE status and enqueues to syncQueue.
+ *
+ * @param {string|number} id
+ * @param {Object} updateData - { name, phone, email, loyaltyPoints }
+ * @param {boolean} [forcedOnlineState]
+ * @returns {Promise<Object>} The updated customer object
+ */
+export async function updateCustomer(id, { name, phone, email, loyaltyPoints }, forcedOnlineState) {
+  const isOnline = forcedOnlineState !== undefined ? forcedOnlineState : checkIsOnline();
+  const isTempId = String(id).startsWith('offline-');
+
+  const updateFields = {};
+  if (name !== undefined) updateFields.name = (name || '').trim();
+  if (phone !== undefined) updateFields.phone = (phone || '').trim();
+  if (email !== undefined) updateFields.email = (email || '').trim();
+  if (loyaltyPoints !== undefined) updateFields.loyalty_points = loyaltyPoints;
+
+  // Try online update directly if it's an existing Supabase record
+  if (isOnline && !isTempId) {
+    try {
+      const { data, error } = await supabase
+        .from('customers')
+        .update(updateFields)
+        .eq('id', id)
+        .select()
+        .single();
+
+      if (error) throw error;
+
+      const syncedCust = mapCustomer(data);
+      await customersDB.put(syncedCust);
+      return syncedCust;
+    } catch (err) {
+      console.warn('[customerService] Supabase customer update failed, falling back to local update:', err);
+    }
+  }
+
+  // Fallback to IndexedDB local update
+  const existing = (await customersDB.get(id)) || {};
+  const updatedLocal = {
+    ...existing,
+    id,
+    name: name !== undefined ? (name || '').trim() : (existing.name ?? ''),
+    phone: phone !== undefined ? (phone || '').trim() : (existing.phone ?? ''),
+    email: email !== undefined ? (email || '').trim() : (existing.email ?? ''),
+    loyaltyPoints: loyaltyPoints !== undefined ? loyaltyPoints : (existing.loyaltyPoints ?? 0),
+    syncStatus: isTempId ? 'PENDING_SYNC' : 'PENDING_UPDATE',
+  };
+
+  await customersDB.put(updatedLocal);
+  await syncQueueDB.enqueue('customer', id, isTempId ? 'CREATE' : 'UPDATE');
+  return updatedLocal;
+}
+
+/**
  * Find customer by phone number.
  * Tries Supabase if online; falls back to IndexedDB.
  *
@@ -207,7 +264,9 @@ export async function syncOfflineCustomers() {
     return { synced: 0, failed: 0 };
   }
 
-  const pending = allLocal.filter((c) => c.syncStatus === 'PENDING_SYNC' || String(c.id).startsWith('offline-'));
+  const pending = allLocal.filter(
+    (c) => c.syncStatus === 'PENDING_SYNC' || c.syncStatus === 'PENDING_UPDATE' || String(c.id).startsWith('offline-')
+  );
   if (pending.length === 0) {
     return { synced: 0, failed: 0 };
   }
@@ -218,30 +277,50 @@ export async function syncOfflineCustomers() {
 
   for (const cust of pending) {
     try {
-      // 1. Insert into Supabase
-      const { data, error } = await supabase
-        .from('customers')
-        .insert({
-          name: cust.name,
-          phone: cust.phone,
-          email: cust.email || '',
-          loyalty_points: cust.loyaltyPoints || 0,
-        })
-        .select()
-        .single();
+      if (String(cust.id).startsWith('offline-')) {
+        // 1. Insert new offline customer into Supabase
+        const { data, error } = await supabase
+          .from('customers')
+          .insert({
+            name: cust.name,
+            phone: cust.phone,
+            email: cust.email || '',
+            loyalty_points: cust.loyaltyPoints || 0,
+          })
+          .select()
+          .single();
 
-      if (error) throw error;
+        if (error) throw error;
 
-      // 2. Remove temporary offline record from IndexedDB
-      if (cust.id !== data.id) {
-        await customersDB.delete(cust.id);
+        // Remove temporary offline record from IndexedDB
+        if (cust.id !== data.id) {
+          await customersDB.delete(cust.id);
+        }
+
+        // Save the new official Supabase customer record in IndexedDB
+        const serverCust = mapCustomer(data);
+        await customersDB.put(serverCust);
+      } else {
+        // 2. Update existing customer in Supabase
+        const { data, error } = await supabase
+          .from('customers')
+          .update({
+            name: cust.name,
+            phone: cust.phone,
+            email: cust.email || '',
+            loyalty_points: cust.loyaltyPoints || 0,
+          })
+          .eq('id', cust.id)
+          .select()
+          .single();
+
+        if (error) throw error;
+
+        const serverCust = mapCustomer(data);
+        await customersDB.put(serverCust);
       }
 
-      // 3. Save the new official Supabase customer record in IndexedDB
-      const serverCust = mapCustomer(data);
-      await customersDB.put(serverCust);
-
-      // 4. Mark corresponding syncQueue entries as SYNCED
+      // Mark corresponding syncQueue entries as SYNCED
       const queueItems = await syncQueueDB.getPending();
       for (const item of queueItems) {
         if (item.entityId === cust.id || (item.entityType === 'customer' && item.entityId === cust.id)) {
@@ -250,7 +329,7 @@ export async function syncOfflineCustomers() {
       }
 
       synced++;
-      console.log(`[customerService] Successfully synced customer "${cust.name}" (Supabase ID: ${data.id})`);
+      console.log(`[customerService] Successfully synced customer "${cust.name}" (Supabase ID: ${cust.id})`);
     } catch (err) {
       console.error(`[customerService] Failed to sync customer ${cust.id} (${cust.name}):`, err);
       failed++;

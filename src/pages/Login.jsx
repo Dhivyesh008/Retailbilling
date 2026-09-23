@@ -168,11 +168,6 @@ export default function Login() {
               {!loading && <ArrowRight size={17} />}
             </button>
           </form>
-
-          <div className="mt-6 space-y-1 border-t border-slate-100 pt-4 text-center text-xs text-slate-400">
-            <p>Admin: <code className="rounded bg-slate-100 px-1.5">Admin@9999</code></p>
-            <p>Manager / Cashier / Staff: <code className="rounded bg-slate-100 px-1.5">store@123</code></p>
-          </div>
         </div>
       </div>
 
